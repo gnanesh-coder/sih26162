@@ -68,7 +68,12 @@ from src.reporting.hex_aggregator import (
 from src.alerting.state_machine import H3RecurrenceTracker, latlng_to_h3
 from src.models.explainability import FireExplainer, parse_rationale_factors
 from src.models.train_classifier import CLASS_NAMES, METRICS_PATH, apply_serving_guards
-from src.models.verified_labels import CLASS_NAME_TO_INDEX, SERVED_ONLY_CLASSES
+from src.models.verified_labels import (
+    CLASS_NAME_TO_INDEX,
+    KNOWN_UNDETECTED_INCIDENTS,
+    SERVED_ONLY_CLASSES,
+    VERIFIED_EVENTS,
+)
 from src.pipeline import replay_mode
 from src.pipeline.responders import (
     RESPONDER_KINDS,
@@ -856,6 +861,58 @@ def map_optical_validation(
             "Unmeasurable points are cloud or no-scene, NOT evidence of no burn."
         ),
         "points": points,
+    }
+
+
+@app.get("/api/v1/counter-register", tags=["Validation"])
+def get_counter_register():
+    """Documented industrial accidents this system produced no signature for.
+
+    The mirror of the verified-event register, and the half that systems built
+    to impress usually omit. These are not failures of the classifier: in most
+    cases there was nothing to classify, because no detection existed. They are
+    the boundary of what a thermal classifier can be asked to do.
+
+    Every accuracy figure this project publishes is conditional on the fire
+    being visible to a polar-orbiting radiometer at the moment it passes
+    overhead. This endpoint states what that condition costs, with a cited
+    source and a measured control for each case -- the control matters, because
+    "we found nothing" is only evidence if the retrieval that found nothing is
+    known to have been working.
+
+    Deliberately *not* verified events: there is nothing to label, so including
+    them would inflate the event count without contributing one scorable row.
+    """
+    incidents = [
+        {
+            "name": inc.name,
+            "date": inc.date,
+            "latitude": inc.lat,
+            "longitude": inc.lon,
+            "source": inc.source,
+            "why_missed": inc.why_missed,
+            "evidence": inc.evidence,
+        }
+        for inc in KNOWN_UNDETECTED_INCIDENTS
+    ]
+    return {
+        "status": "OK",
+        "purpose": (
+            "Documented industrial accidents that produced no usable FIRMS "
+            "signature. These bound what every accuracy figure in this project "
+            "may claim."
+        ),
+        "n_undetected": len(incidents),
+        "n_verified_for_contrast": len(VERIFIED_EVENTS),
+        "reading": (
+            "A detection rate cannot be computed from these. They were found by "
+            "searching news archives for documented industrial fires and then "
+            "checking the corpus, which is a biased sample: it finds fires that "
+            "were reported, not a random draw from fires that occurred. What "
+            "they establish is that the blind spots are real and have named "
+            "mechanisms, not that they are rare."
+        ),
+        "incidents": incidents,
     }
 
 
