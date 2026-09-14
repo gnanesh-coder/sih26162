@@ -50,3 +50,8 @@ Thumbs.db
 # Local editor / tooling config. .claude/launch.json is the dev-server entry
 # for the browser preview -- useful on this machine, noise in a shared repo.
 .claude/
+
+# Superseded dashboard iterations. Git history already preserves anything worth
+# recovering; keeping them in the tree just invites a reader to open the wrong
+# index.html.
+backups/
