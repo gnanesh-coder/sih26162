@@ -70,6 +70,11 @@ from src.models.explainability import FireExplainer, parse_rationale_factors
 from src.models.train_classifier import CLASS_NAMES, METRICS_PATH, apply_serving_guards
 from src.models.verified_labels import CLASS_NAME_TO_INDEX, SERVED_ONLY_CLASSES
 from src.pipeline import replay_mode
+from src.pipeline.responders import (
+    RESPONDER_KINDS,
+    layer_summary as responder_layer_summary,
+    nearest_responders,
+)
 from src.pipeline.spatial_join import (
     DEFAULT_MERGED_PARQUET,
     DEFAULT_OSM_PARQUET,
@@ -852,6 +857,70 @@ def map_optical_validation(
         ),
         "points": points,
     }
+
+
+@app.get("/api/v1/incident/{incident_id}/responders", tags=["Surveillance", "Dispatch"])
+def get_incident_responders(
+    incident_id: int,
+    per_kind: int = Query(1, ge=1, le=5, description="How many of each category to return"),
+    max_km: float = Query(100.0, gt=0, le=500, description="Search radius in kilometres"),
+    db: Session = Depends(get_db),
+):
+    """Nearest fire station, hospital and police station to an incident.
+
+    Grouped by category rather than returned as a flat nearest-N list: the three
+    are not interchangeable. A flat list of the five closest facilities in a city
+    centre would be five hospitals and no fire station, which is the one category
+    an incident commander actually needs.
+
+    **Distance is geodesic, and travel time is explicitly not routed.** The
+    payload carries the circuity factor and assumed speed that produced the
+    indicative minutes, so the figure cannot travel without its assumptions. A
+    straight line divided by an assumed speed, presented as a "real-time ETA",
+    would be a fabricated measurement of the same family as the synthetic
+    weather this project removed.
+    """
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found.")
+
+    result = nearest_responders(
+        lat=float(incident.latitude),
+        lon=float(incident.longitude),
+        per_kind=per_kind,
+        max_km=max_km,
+    )
+    result["incident"] = {
+        "id": incident.id,
+        "latitude": float(incident.latitude),
+        "longitude": float(incident.longitude),
+        "predicted_class": incident.predicted_class,
+        "alert_priority": incident.alert_priority,
+        "facility_name": incident.facility_name,
+    }
+    return result
+
+
+@app.get("/api/v1/responders/coverage", tags=["Dispatch"])
+def get_responder_coverage():
+    """What the responder layer contains, and what it does not.
+
+    Reported as its own endpoint because the count is a caveat as much as a
+    capability: OSM maps 741 fire stations for the whole of India, which is
+    certainly an undercount. A facility absent here is absent from the map, not
+    from the ground, and a dispatch surface that did not say so would imply a
+    completeness it does not have.
+    """
+    summary = responder_layer_summary()
+    summary["kinds"] = list(RESPONDER_KINDS)
+    summary["build_command"] = "python -m src.ingestion.pbf_extractor --layer responders"
+    summary["caveat"] = (
+        "OpenStreetMap community data, not an official register. Coverage is "
+        "uneven: hospitals are mapped densely and fire stations sparsely, so the "
+        "nearest mapped fire station can be far further than the nearest real "
+        "one. Distances are geodesic; no road graph is consulted."
+    )
+    return summary
 
 
 @app.get("/api/v1/incidents/near", tags=["Surveillance", "Spatial"])

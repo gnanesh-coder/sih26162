@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import geopandas as gpd
+import pandas as pd
 import pyogrio
 
 logger = logging.getLogger("pbf_extractor")
@@ -61,6 +62,44 @@ FOREST_WHERE = (
     "OR other_tags LIKE '%\"landuse\"=>\"forest\"%' "
     "OR other_tags LIKE '%\"natural\"=>\"wood\"%'"
 )
+
+
+# Emergency response infrastructure. Unlike the other two layers this is
+# mostly POINTS, not polygons: OSM maps a fire station as a node far more often
+# than as a building footprint, so both layers have to be read and merged.
+#
+# Three categories are kept and labelled rather than pooled, because they are
+# not interchangeable to an incident commander. A fire station is the response;
+# a hospital is where casualties go; police handle cordon and evacuation. The
+# SitRep already recommends an evacuation cordon, and recommending one without
+# being able to say who enforces it is half an answer.
+# Two filters, because the two layers do not share a schema. `multipolygons`
+# exposes `amenity` as a real column; `points` does not -- it carries only
+# osm_id, name, barrier, highway, ref, address, is_in, place, man_made and
+# other_tags, so the amenity tag has to be matched inside the hstore.
+#
+# The first version used the multipolygons filter for both and GDAL rejected it
+# on points as invalid SQL. The extractor logged the refusal and carried on with
+# polygons alone, yielding 411 fire stations for the whole of India -- a plainly
+# wrong number that would have gone unnoticed if the warning had not been read.
+RESPONDER_WHERE_POLY = (
+    "amenity IN ('fire_station', 'hospital', 'police') "
+    "OR other_tags LIKE '%\"amenity\"=>\"fire_station\"%' "
+    "OR other_tags LIKE '%\"emergency\"=>\"fire_station\"%'"
+)
+
+RESPONDER_WHERE_POINTS = (
+    "other_tags LIKE '%\"amenity\"=>\"fire_station\"%' "
+    "OR other_tags LIKE '%\"amenity\"=>\"hospital\"%' "
+    "OR other_tags LIKE '%\"amenity\"=>\"police\"%' "
+    "OR other_tags LIKE '%\"emergency\"=>\"fire_station\"%'"
+)
+
+RESPONDER_KINDS = {
+    "fire_station": "FIRE",
+    "hospital": "HOSPITAL",
+    "police": "POLICE",
+}
 
 
 def _extract_from_pbf(
@@ -154,6 +193,101 @@ def extract_forest_from_pbf(
     )
 
 
+def extract_responders_from_pbf(
+    pbf_path: Path,
+    output_parquet: Path = Path("data/reference/osm_india_responders_from_pbf.parquet"),
+) -> gpd.GeoDataFrame:
+    """Extracts emergency response infrastructure as POINTS.
+
+    Reads both the `points` and `multipolygons` layers and merges them: a fire
+    station tagged as a node and one tagged as a building footprint are the same
+    facility for dispatch purposes, and taking the representative point of the
+    polygon puts them in one coordinate space.
+
+    `representative_point()` rather than `centroid`: a centroid can fall outside
+    a concave footprint, which would place a fire station in the car park next
+    door. The difference is metres and irrelevant to an ETA, but a coordinate
+    that is not on the thing it names is wrong for no reason.
+    """
+    if not pbf_path.exists():
+        raise FileNotFoundError(f"PBF file not found at: {pbf_path}")
+
+    frames = []
+    for layer, where in (
+        ("points", RESPONDER_WHERE_POINTS),
+        ("multipolygons", RESPONDER_WHERE_POLY),
+    ):
+        try:
+            df = pyogrio.read_dataframe(pbf_path, layer=layer, where=where)
+        except Exception as e:
+            # Loud, and fatal for this layer. A silently skipped layer produced
+            # 411 fire stations for a country of 1.4 billion people.
+            raise RuntimeError(
+                f"Pushdown filter refused on layer '{layer}': {e}. "
+                "Refusing to write a responder layer that is missing a source."
+            ) from e
+        if len(df) == 0:
+            continue
+        gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+        if layer == "multipolygons":
+            gdf["geometry"] = gdf.geometry.representative_point()
+        gdf["source_layer"] = layer
+        frames.append(gdf)
+        logger.info("Extracted %d responder features from '%s'.", len(gdf), layer)
+
+    if not frames:
+        raise RuntimeError("No responder features extracted from either layer.")
+
+    merged = gpd.GeoDataFrame(
+        pd.concat(frames, ignore_index=True), geometry="geometry", crs="EPSG:4326"
+    )
+
+    # Normalise the kind. `amenity` is a real column in the points layer but can
+    # be absent from multipolygons, where the tag lives inside other_tags.
+    other = merged.get("other_tags")
+    other = other.fillna("").astype(str) if other is not None else ""
+    amenity = merged.get("amenity")
+    amenity = amenity.fillna("").astype(str) if amenity is not None else ""
+
+    kind = []
+    for a, o in zip(amenity, other):
+        matched = RESPONDER_KINDS.get(a)
+        if matched is None:
+            for tag, label in RESPONDER_KINDS.items():
+                if f'"{tag}"' in o:
+                    matched = label
+                    break
+        kind.append(matched or "UNKNOWN")
+    merged["responder_kind"] = kind
+
+    # A feature whose category could not be resolved is dropped rather than
+    # dispatched to as "UNKNOWN": sending an incident commander to something
+    # that might be a hospital is worse than not listing it.
+    before = len(merged)
+    merged = merged[merged["responder_kind"] != "UNKNOWN"].copy()
+    if before != len(merged):
+        logger.info("Dropped %d features with an unresolved category.", before - len(merged))
+
+    merged["responder_name"] = (
+        merged.get("name").fillna("").astype(str) if "name" in merged.columns else ""
+    )
+    merged["latitude"] = merged.geometry.y
+    merged["longitude"] = merged.geometry.x
+
+    keep = ["responder_kind", "responder_name", "latitude", "longitude",
+            "source_layer", "geometry"]
+    merged = merged[[c for c in keep if c in merged.columns]]
+
+    output_parquet.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(output_parquet, index=False)
+    logger.info(
+        "Saved %d responders to %s (%s).",
+        len(merged), output_parquet,
+        merged["responder_kind"].value_counts().to_dict(),
+    )
+    return merged
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract polygons from .osm.pbf")
     parser.add_argument(
@@ -164,7 +298,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--layer",
-        choices=["industrial", "forest"],
+        choices=["industrial", "forest", "responders"],
         default="industrial",
         help="Which land use to extract",
     )
@@ -172,7 +306,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     pbf_file = Path(args.pbf)
-    if args.layer == "forest":
+    if args.layer == "responders":
+        out = Path(args.output or "data/reference/osm_india_responders_from_pbf.parquet")
+        extract_responders_from_pbf(pbf_file, out)
+    elif args.layer == "forest":
         out = Path(args.output or "data/reference/osm_india_forest_from_pbf.parquet")
         extract_forest_from_pbf(pbf_file, out)
     else:

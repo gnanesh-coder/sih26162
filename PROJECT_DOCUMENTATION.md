@@ -133,7 +133,7 @@ d:\industrial-fire-classifier\
 ├── app/                              # FastAPI Service & Frontend
 │   ├── __init__.py
 │   ├── database.py                   # PostGIS ORM layer: geometry(Point,4326), GiST, ST_DWithin
-│   ├── main.py                       # 26 REST API endpoints, routing, state managers
+│   ├── main.py                       # 28 REST API endpoints, routing, state managers
 │   ├── templates/
 │   │   └── index.html                # Sentinel Thermal C2 Dashboard & Simulation UI
 │   └── static/                       # Static web assets
@@ -709,12 +709,14 @@ Note that the plume *length* is a genuine function of Fire Radiative Power. It i
 
 ## 5. Complete REST API Reference
 
-All 26 endpoints run on `http://127.0.0.1:8000` with interactive Swagger docs at `/docs` and ReDoc at `/redoc`.
+All 28 endpoints run on `http://127.0.0.1:8000` with interactive Swagger docs at `/docs` and ReDoc at `/redoc`.
 
 | Method | Endpoint | Tags | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | UI Dashboard | Serves the Sentinel Thermal C2 Leaflet GIS dashboard, including the corpus-scale H3 archive layer |
 | `GET` | `/api/v1/health` | System | Runtime health, database record counts, GIS boundary & model status. Reports `database_mode`, `postgis_version` and `offline_mode`, so a degraded datastore is never invisible |
+| `GET` | `/api/v1/incident/{incident_id}/responders` | Dispatch | Nearest fire station, hospital and police station. Grouped by category, because the three are not interchangeable. Distance is geodesic; travel time is explicitly **not routed** and carries the circuity factor and assumed speed that produced it |
+| `GET` | `/api/v1/responders/coverage` | Dispatch | What the responder layer holds and what it does not -- 61,001 facilities, of which only 741 are fire stations, which is an undercount and is reported as one |
 | `GET` | `/api/v1/incidents/near` | Spatial | Incidents within a true-metre radius of a point, nearest first. PostGIS `ST_DWithin` over `geography` against the GiST index; reports which engine answered |
 | `GET` | `/api/v1/alerts/active` | Surveillance | Fetches active incidents with priority, state, FRP, and facility filtering |
 | `GET` | `/api/v1/incident/{incident_id}` | Surveillance | Deep incident telemetry, coordinates, and local TreeSHAP factor attributions |
@@ -1579,7 +1581,7 @@ Regenerate this section with `python scripts/generate_verified_register.py` afte
 
 ## 6. Verification, Testing & Robustness Suite
 
-The test suite consists of **335 automated pytest unit and integration tests** located in `tests/`:
+The test suite consists of **367 automated pytest unit and integration tests** located in `tests/`:
 
 ```bash
 # Run complete test suite
