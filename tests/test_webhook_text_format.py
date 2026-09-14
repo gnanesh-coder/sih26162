@@ -45,7 +45,15 @@ def _deliver(body_format):
     return result, post.call_args.kwargs
 
 
-def test_json_remains_the_default():
+def test_json_remains_the_default(monkeypatch):
+    """With nothing configured, the body is JSON.
+
+    This must clear ALERT_WEBHOOK_FORMAT rather than trusting the ambient
+    environment. It did not, and the day a developer's own .env set text mode
+    the test failed -- reporting a broken default when the default was fine and
+    the test was simply reading someone's local configuration.
+    """
+    monkeypatch.delenv("ALERT_WEBHOOK_FORMAT", raising=False)
     ch = WebhookChannel(url="https://example.test/hook")
     assert ch.body_format == "json"
 
@@ -103,11 +111,24 @@ def test_title_is_bounded():
     assert len(post.call_args.kwargs["headers"]["Title"]) <= 120
 
 
-def test_text_mode_does_not_make_the_sms_channel_real():
-    """The whole point. A push notification is not an SMS."""
+def test_text_mode_is_a_separate_channel_from_sms(monkeypatch):
+    """A push notification is not an SMS, and configuring one is not the other.
+
+    When this was written the SMS channel was a stub, and the test asserted
+    NOT_IMPLEMENTED. SMS is now genuinely implemented, so the claim under test
+    narrows to the part that still matters: pointing the webhook at a push
+    service does not configure SMS, and an unconfigured SMS channel does not
+    report delivery.
+    """
+    for key in ("ALERT_SMS_PROVIDER", "ALERT_SMS_TO", "ALERT_SMS_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ALERT_WEBHOOK_URL", "https://ntfy.sh/t")
+    monkeypatch.setenv("ALERT_WEBHOOK_FORMAT", "text")
+
     sms = SmsChannel()
     assert sms.is_configured() is False
-    assert sms.send(ALERT).status is DispatchStatus.NOT_IMPLEMENTED
+    assert sms.send(ALERT).status is DispatchStatus.NOT_CONFIGURED
+    assert WebhookChannel().is_configured() is True
 
 
 def test_target_description_names_the_format():

@@ -88,13 +88,24 @@ def test_configured_channel_dry_runs_when_disabled(monkeypatch):
 # --------------------------------------------------------------------------
 
 def test_sms_never_claims_delivery(monkeypatch):
-    """No provider is wired, so SMS must say so even with dispatch enabled."""
+    """SMS must never report delivery it cannot account for.
+
+    This test predates the provider implementation, when the channel was a
+    deliberate stub returning NOT_IMPLEMENTED. The adapter now sends for real,
+    so the expected status changed -- but the rule the stub existed to protect
+    did not: with no gateway configured the channel reports NOT_CONFIGURED and
+    `delivered` stays False. Nothing here may return a delivery receipt for a
+    message no provider was asked to carry.
+    """
     monkeypatch.setenv("ALERT_DISPATCH_ENABLED", "true")
+    for key in ("ALERT_SMS_PROVIDER", "ALERT_SMS_TO", "ALERT_SMS_API_KEY",
+                "ALERT_SMS_FROM", "ALERT_SMS_URL"):
+        monkeypatch.delenv(key, raising=False)
     result = SmsChannel().send(_alert())
 
-    assert result.status is DispatchStatus.NOT_IMPLEMENTED
+    assert result.status is DispatchStatus.NOT_CONFIGURED
     assert result.delivered is False
-    assert "no sms provider" in result.detail.lower()
+    assert result.status is not DispatchStatus.SENT
 
 
 def test_unconfigured_channel_reports_not_configured(monkeypatch):

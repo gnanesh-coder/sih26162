@@ -57,6 +57,10 @@ class DispatchStatus(str, Enum):
     """Outcome of a single delivery attempt. Only SENT means a packet left."""
 
     SENT = "SENT"
+    # Some recipients reached, others not. Neither SENT nor FAILED is true of a
+    # half-delivered page, and collapsing it into either would misinform the
+    # operator about whether responders were notified.
+    PARTIAL = "PARTIAL"
     DRY_RUN = "DRY_RUN"                    # built and logged, deliberately not sent
     NOT_CONFIGURED = "NOT_CONFIGURED"      # channel has no credentials/endpoint
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"    # adapter exists, no provider wired
@@ -101,6 +105,17 @@ def dispatch_enabled() -> bool:
 # ---------------------------------------------------------------------------
 # Channels
 # ---------------------------------------------------------------------------
+
+
+def _mask_number(number: str) -> str:
+    """Last four digits only.
+
+    Dispatch reports are written to the audit log, which is retained as
+    regulatory evidence. That log should record that a responder was paged, not
+    accumulate into a directory of responders' personal numbers.
+    """
+    digits = "".join(ch for ch in number if ch.isdigit())
+    return f"...{digits[-4:]}" if len(digits) >= 4 else "..."
 
 
 class DispatchChannel(ABC):
@@ -263,32 +278,140 @@ class EmailChannel(DispatchChannel):
 
 
 class SmsChannel(DispatchChannel):
-    """SMS adapter with no provider wired. Always reports NOT_IMPLEMENTED.
+    """Sends the alert as SMS through a configured gateway.
 
-    The problem statement asks for SMS gateway delivery, and an SMS gateway
-    requires a commercial account this project does not have. The adapter exists
-    so the routing table is complete and a provider is a drop-in, but it will
-    never claim to have sent anything. A stub that returned SENT would be a
-    fabricated delivery receipt for a message nobody received -- worse than an
-    absent feature, because an operator would believe responders were notified.
+    Three providers, because the sensible choice depends on what the operator
+    has rather than on what this project prefers:
+
+    * ``httpsms``  -- httpsms.com turns an ordinary Android handset into the
+      gateway. Free, no commercial account, and the messages leave from a real
+      Indian number, which matters: a transactional SMS from an unknown foreign
+      shortcode is the one most likely to be ignored at 3am.
+    * ``twilio``   -- the commercial default, if an account exists.
+    * ``generic``  -- any gateway that accepts an HTTP POST. The body is a
+      template with ``{to}``, ``{from}`` and ``{text}`` placeholders, so a
+      provider this project has never heard of needs configuration, not code.
+
+    **Unconfigured is NOT_CONFIGURED, not NOT_IMPLEMENTED.** The distinction
+    matters and is the reason this class was a deliberate stub until now: the
+    previous version could not send at all, and said so. It can now, so the only
+    honest remaining failure is "no credentials", which is the operator's to
+    fix rather than the code's.
+
+    What has not changed is the rule the stub existed to protect: **a result is
+    SENT only when the gateway said so.** Per-recipient outcomes are tracked
+    separately, a partial delivery reports PARTIAL with the counts, and a total
+    failure reports FAILED. Nothing here returns a delivery receipt for a
+    message the provider did not acknowledge.
     """
 
     name = "sms"
 
+    HTTPSMS_URL = "https://api.httpsms.com/v1/messages/send"
+    TWILIO_URL = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+
+    def __init__(self) -> None:
+        self.provider = os.getenv("ALERT_SMS_PROVIDER", "").strip().lower()
+        self.recipients = [
+            r.strip() for r in os.getenv("ALERT_SMS_TO", "").split(",") if r.strip()
+        ]
+        self.sender = os.getenv("ALERT_SMS_FROM", "").strip()
+
+        # httpsms
+        self.api_key = os.getenv("ALERT_SMS_API_KEY", "")
+        # twilio
+        self.twilio_sid = os.getenv("ALERT_TWILIO_ACCOUNT_SID", "").strip()
+        self.twilio_token = os.getenv("ALERT_TWILIO_AUTH_TOKEN", "")
+        # generic
+        self.generic_url = os.getenv("ALERT_SMS_URL", "").strip()
+        self.generic_template = os.getenv(
+            "ALERT_SMS_BODY_TEMPLATE",
+            '{{"to": "{to}", "from": "{from}", "text": "{text}"}}',
+        )
+        self.generic_auth = os.getenv("ALERT_SMS_AUTH_HEADER", "")
+
     def is_configured(self) -> bool:
-        # Deliberately always False: honest about having no provider.
+        if not self.recipients:
+            return False
+        if self.provider == "httpsms":
+            return bool(self.api_key and self.sender)
+        if self.provider == "twilio":
+            return bool(self.twilio_sid and self.twilio_token and self.sender)
+        if self.provider == "generic":
+            return bool(self.generic_url)
         return False
 
-    def send(self, alert: Dict[str, Any]) -> DispatchResult:
-        return DispatchResult(
-            self.name, DispatchStatus.NOT_IMPLEMENTED,
-            detail=("No SMS provider is wired. Implement SmsChannel._deliver "
-                    "against a gateway account; until then this channel reports "
-                    "honestly rather than claiming delivery."),
-        )
+    def target_description(self) -> str:
+        # Numbers are partially masked. A dispatch report is written to the
+        # audit log, and an audit trail should record that a responder was
+        # paged without becoming a directory of their phone numbers.
+        return f"{self.provider}: " + ", ".join(_mask_number(n) for n in self.recipients)
 
-    def _deliver(self, alert: Dict[str, Any]) -> DispatchResult:  # pragma: no cover
-        raise NotImplementedError("No SMS provider configured.")
+    def _send_one(self, number: str, text: str) -> tuple:
+        """Returns (ok, detail) for one recipient."""
+        if self.provider == "httpsms":
+            resp = requests.post(
+                self.HTTPSMS_URL,
+                json={"content": text, "from": self.sender, "to": number},
+                headers={"x-api-key": self.api_key, "Content-Type": "application/json"},
+                timeout=DISPATCH_TIMEOUT_S,
+            )
+        elif self.provider == "twilio":
+            resp = requests.post(
+                self.TWILIO_URL.format(sid=self.twilio_sid),
+                data={"From": self.sender, "To": number, "Body": text},
+                auth=(self.twilio_sid, self.twilio_token),
+                timeout=DISPATCH_TIMEOUT_S,
+            )
+        else:  # generic
+            headers = {"Content-Type": "application/json"}
+            if self.generic_auth and ":" in self.generic_auth:
+                key, _, value = self.generic_auth.partition(":")
+                headers[key.strip()] = value.strip()
+            body = (
+                self.generic_template
+                .replace("{to}", number)
+                .replace("{from}", self.sender)
+                .replace("{text}", text.replace('"', '\\"'))
+            )
+            resp = requests.post(
+                self.generic_url, data=body.encode("utf-8"),
+                headers=headers, timeout=DISPATCH_TIMEOUT_S,
+            )
+
+        if 200 <= resp.status_code < 300:
+            return True, f"HTTP {resp.status_code}"
+        # The body can echo the API key on some gateways; only the status and a
+        # short prefix are kept, and never the request.
+        return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
+
+    def _deliver(self, alert: Dict[str, Any]) -> DispatchResult:
+        text = format_alert_sms(alert)
+        sent, failed = [], []
+        for number in self.recipients:
+            try:
+                ok, detail = self._send_one(number, text)
+            except Exception as exc:  # noqa: BLE001 - one number must not take the rest down
+                ok, detail = False, f"{type(exc).__name__}: {exc}"
+            (sent if ok else failed).append((_mask_number(number), detail))
+
+        target = self.target_description()
+        if failed and sent:
+            return DispatchResult(
+                self.name, DispatchStatus.PARTIAL, target=target,
+                detail=(f"{len(sent)} of {len(self.recipients)} delivered; "
+                        f"failed: " + "; ".join(f"{n} {d}" for n, d in failed)),
+            )
+        if failed:
+            return DispatchResult(
+                self.name, DispatchStatus.FAILED, target=target,
+                detail="; ".join(f"{n} {d}" for n, d in failed),
+            )
+        return DispatchResult(
+            self.name, DispatchStatus.SENT, target=target,
+            detail=(f"{len(sent)} recipient(s), {len(text)} chars, 1 segment "
+                    f"({'GSM-7' if is_gsm7(text) else 'UCS-2'})"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +455,94 @@ def format_alert_text(alert: Dict[str, Any]) -> str:
         "been confirmed on the ground. Verify before committing responders.",
     ]
     return "\n".join(lines)
+
+
+# An SMS segment is 160 GSM-7 characters; anything longer is split and billed
+# per segment, and a gateway may truncate rather than split. The long-form body
+# is written to be read on a phone at 3am, not to fit in one segment, so SMS
+# gets its own format: the facts a responder needs to move, in one segment.
+SMS_SEGMENT_CHARS = 160      # GSM-7
+SMS_SEGMENT_CHARS_UCS2 = 70  # anything outside GSM-7 forces this
+
+# The GSM 03.38 basic alphabet, plus the characters that live in its extension
+# table. A message containing anything outside this set is encoded UCS-2 by the
+# gateway, and a single segment then holds 70 characters instead of 160.
+#
+# This caught a real bug. The truncation marker was a typographic ellipsis
+# (U+2026), which is not in GSM-7 -- so a body trimmed to "fit one segment" was
+# silently promoted to UCS-2 and billed as three. The marker is now three ASCII
+# dots, and the limit follows the encoding the text actually requires.
+# Built from code points rather than a literal, so the set cannot be corrupted
+# by whatever tooling edits this file next -- which is exactly how it broke the
+# first time.
+_GSM7 = (
+    set("@\u00a3$\u00a5\u00e8\u00e9\u00f9\u00ec\u00f2\u00c7")
+    | set("\n\r ")
+    | set("\u00d8\u00f8\u00c5\u00e5\u0394_\u03a6\u0393\u039b\u03a9")
+    | set("\u03a0\u03a8\u03a3\u0398\u039e\u00c6\u00e6\u00df\u00c9")
+    | set("!\"#\u00a4%&'()*+,-./:;<=>?")
+    | set("0123456789")
+    | set("\u00a1ABCDEFGHIJKLMNOPQRSTUVWXYZ\u00c4\u00d6\u00d1\u00dc\u00a7")
+    | set("\u00bfabcdefghijklmnopqrstuvwxyz\u00e4\u00f6\u00f1\u00fc\u00e0")
+    # GSM-7 extension table: each of these actually costs two septets, so a
+    # message full of them fits fewer than 160. Treated as in-alphabet here,
+    # which keeps the limit honest for the alerts this system sends -- they are
+    # coordinates, numbers and facility names, not braces and euro signs.
+    | set("^{}\\[~]|\u20ac")
+)
+
+
+def is_gsm7(text: str) -> bool:
+    """Whether `text` fits the GSM-7 alphabet, and so the 160-char segment."""
+    return all(ch in _GSM7 for ch in text)
+
+
+def sms_segment_limit(text: str) -> int:
+    """Characters available in ONE segment for this text's required encoding."""
+    return SMS_SEGMENT_CHARS if is_gsm7(text) else SMS_SEGMENT_CHARS_UCS2
+
+
+def format_alert_sms(alert: Dict[str, Any], limit: Optional[int] = None) -> str:
+    """One-segment SMS body, truncated deliberately rather than split.
+
+    Ordering is by what a responder acts on: priority, where, how hot, what it
+    is. The coordinate keeps four decimal places -- roughly 11 m, finer than
+    the 375 m VIIRS pixel the detection came from, so nothing useful is lost.
+
+    OSM facility names are frequently in Devanagari or another Indic script,
+    none of which is GSM-7. Rather than mangling the name, the limit drops to
+    the 70 characters a UCS-2 segment actually holds, so the message still
+    leaves as one segment and the coordinates -- the part a crew needs -- are
+    never the thing that gets cut.
+    """
+    lat = alert.get("latitude")
+    lon = alert.get("longitude")
+    where = (
+        f"{lat:.4f},{lon:.4f}"
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+        else "?"
+    )
+    facility = (alert.get("facility_name") or "unmapped").strip()
+
+    frp = alert.get("frp")
+    frp_txt = f" {frp:.0f}MW" if isinstance(frp, (int, float)) else ""
+
+    head = f"{alert.get('priority', 'ALERT')} {alert.get('state', 'THERMAL')}"
+    body = f"{head} {where}{frp_txt} {facility}"
+
+    # Unverified is not a footnote on an SMS: it is what stops a crew being
+    # committed on a model output. Kept even when the name is cut.
+    tail = " -unverified sat detection"
+
+    if limit is None:
+        limit = sms_segment_limit(body + tail)
+
+    room = limit - len(tail)
+    if len(body) > room:
+        # Three ASCII dots, not U+2026: the typographic ellipsis is outside
+        # GSM-7 and would push the whole message into UCS-2.
+        body = body[: max(0, room - 3)].rstrip() + "..."
+    return (body + tail)[:limit]
 
 
 class AlertDispatcher:
