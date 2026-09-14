@@ -1090,6 +1090,7 @@
         <div id="dossier-recurrence" class="raised hairline rounded p-2.5"></div>
         <div id="dossier-optical" class="raised hairline rounded p-2.5"></div>
         <div id="dossier-thermal-probe" class="raised hairline rounded p-2.5"></div>
+        <div id="dossier-responders" class="raised hairline rounded p-2.5"></div>
         <div id="dossier-dispatch" class="raised hairline rounded p-2.5"></div>
       </div>
 
@@ -3267,7 +3268,113 @@
       document.getElementById('dossier-frp-desc').textContent = `TI4: ${inc.bright_ti4 ? inc.bright_ti4.toFixed(1) + ' K' : '360.0 K'}`;
 
       await fetchWeatherAndDrawPlume(inc.latitude, inc.longitude, inc.frp);
+      renderResponders(inc.id);
     }
+
+    // ---------------------------------------------------------------------
+    // Nearest emergency responders
+    //
+    // Grouped by category rather than a flat nearest-N list: in a city centre
+    // the five closest facilities are five hospitals and no fire station,
+    // which is the one category an incident commander actually needs.
+    //
+    // A category with nothing in range is rendered as "none within Nkm", not
+    // omitted. A live P0 at a coal washery has a hospital at 2.5 km and no
+    // mapped fire station within 100 km, and that absence is a finding about
+    // response capability -- hiding it would make the panel a nicer picture
+    // and a worse instrument.
+    // ---------------------------------------------------------------------
+    const RESPONDER_STYLE = {
+      FIRE:     { label: 'Fire',     icon: '\u25B2', colour: 'var(--p0-ink)' },
+      HOSPITAL: { label: 'Hospital', icon: '\u271A', colour: 'var(--p1-ink)' },
+      POLICE:   { label: 'Police',   icon: '\u25C6', colour: 'var(--p2-ink)' }
+    };
+
+    let responderLayer = null;
+
+    function clearResponderLayer() {
+      if (responderLayer && map) { map.removeLayer(responderLayer); responderLayer = null; }
+    }
+
+    async function renderResponders(incidentId) {
+      const el = document.getElementById('dossier-responders');
+      if (!el) return;
+      clearResponderLayer();
+      el.innerHTML = '<span class="label block">Nearest response</span>' +
+                     '<p class="text-[12px] t3 mt-1">Locating\u2026</p>';
+
+      let data;
+      try {
+        const r = await fetch(`/api/v1/incident/${incidentId}/responders?per_kind=1`);
+        data = await r.json();
+      } catch (e) {
+        el.innerHTML = '<span class="label block">Nearest response</span>' +
+          '<p class="text-[12px] t3 mt-1">Lookup unavailable.</p>';
+        return;
+      }
+
+      if (data.status !== 'OK') {
+        el.innerHTML = '<span class="label block">Nearest response</span>' +
+          `<p class="text-[12px] t3 mt-1">${data.reason || 'Responder layer not built.'}</p>`;
+        return;
+      }
+
+      const maxKm = (data.query && data.query.max_km) || 100;
+      const rows = [];
+      const markers = [];
+
+      for (const kind of ['FIRE', 'HOSPITAL', 'POLICE']) {
+        const style = RESPONDER_STYLE[kind];
+        const items = (data.responders && data.responders[kind]) || [];
+        if (!items.length) {
+          rows.push(
+            `<div class="flex items-baseline gap-2 mt-1">
+               <span class="font-mono text-[11px]" style="color:var(--text-3)">${style.icon}</span>
+               <span class="text-[12px] t2" style="min-width:4.2rem">${style.label}</span>
+               <span class="text-[12px] t3">none mapped within ${maxKm} km</span>
+             </div>`);
+          continue;
+        }
+        const it = items[0];
+        const mins = it.travel_estimate.indicative_minutes;
+        rows.push(
+          `<div class="flex items-baseline gap-2 mt-1">
+             <span class="font-mono text-[11px]" style="color:${style.colour}">${style.icon}</span>
+             <span class="text-[12px] t2" style="min-width:4.2rem">${style.label}</span>
+             <span class="font-mono text-[12px] t1">${it.distance_km.toFixed(1)} km</span>
+             <span class="font-mono text-[11px] t3">~${mins.toFixed(0)} min*</span>
+             <span class="text-[12px] t3 truncate" title="${it.name}">${it.name}</span>
+           </div>`);
+        markers.push({ item: it, style });
+      }
+
+      el.innerHTML =
+        '<span class="label block">Nearest response</span>' +
+        rows.join('') +
+        `<p class="text-[11px] t3 mt-2 leading-snug">
+           * Straight-line distance is measured. The time is <strong>indicative, not
+           routed</strong>: distance &times; 1.3 circuity at an assumed 40 km/h, with no
+           road graph consulted. OSM maps 741 fire stations nationally, so an absent
+           facility means absent from the map, not from the ground.
+         </p>`;
+
+      // Draw them, with a line back to the incident so the geometry is visible.
+      if (map && markers.length) {
+        const group = [];
+        for (const { item, style } of markers) {
+          group.push(L.circleMarker([item.latitude, item.longitude], {
+            radius: 6, color: style.colour, weight: 2,
+            fillColor: style.colour, fillOpacity: 0.25
+          }).bindTooltip(`${style.label}: ${item.name} (${item.distance_km.toFixed(1)} km)`));
+          group.push(L.polyline(
+            [[data.incident.latitude, data.incident.longitude], [item.latitude, item.longitude]],
+            { color: style.colour, weight: 1, opacity: 0.45, dashArray: '4 4' }
+          ));
+        }
+        responderLayer = L.layerGroup(group).addTo(map);
+      }
+    }
+
 
     /*
       Render the per-feature attribution the model actually produced.

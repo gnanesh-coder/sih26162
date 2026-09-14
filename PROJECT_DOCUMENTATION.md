@@ -1581,7 +1581,7 @@ Regenerate this section with `python scripts/generate_verified_register.py` afte
 
 ## 6. Verification, Testing & Robustness Suite
 
-The test suite consists of **367 automated pytest unit and integration tests** located in `tests/`:
+The test suite consists of **376 automated pytest unit and integration tests** located in `tests/`:
 
 ```bash
 # Run complete test suite

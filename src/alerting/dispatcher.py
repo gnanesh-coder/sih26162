@@ -144,28 +144,59 @@ class DispatchChannel(ABC):
 
 
 class WebhookChannel(DispatchChannel):
-    """POSTs the alert as JSON to a configured endpoint.
+    """POSTs the alert to a configured endpoint, as JSON or as plain text.
 
     When ALERT_WEBHOOK_SECRET is set the body is signed with HMAC-SHA256 and the
     digest travels in `X-SIH-Signature`, so a receiver can verify the alert came
     from this system rather than from anyone who learned the URL.
+
+    **Two body formats, because the receiver decides what is useful.** A machine
+    endpoint wants JSON. A push service that puts a notification on a phone --
+    ntfy, Gotify, and similar -- renders the body as the message a human reads,
+    and a wall of raw JSON on a lock screen at 3am is not readable.
+
+    Setting ALERT_WEBHOOK_FORMAT=text sends `format_alert_text()` instead, with
+    a `Title` header those services use as the notification headline. That gives
+    the system a phone-delivery path over the channel that already exists,
+    without wiring a commercial SMS gateway or pretending one is wired: the
+    SmsChannel still reports NOT_IMPLEMENTED, because a notification is not an
+    SMS and claiming otherwise would be a fabricated delivery receipt.
     """
 
     name = "webhook"
 
-    def __init__(self, url: Optional[str] = None, secret: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        secret: Optional[str] = None,
+        body_format: Optional[str] = None,
+    ) -> None:
         self.url = os.getenv("ALERT_WEBHOOK_URL", "") if url is None else url
         self.secret = os.getenv("ALERT_WEBHOOK_SECRET", "") if secret is None else secret
+        fmt = os.getenv("ALERT_WEBHOOK_FORMAT", "json") if body_format is None else body_format
+        self.body_format = fmt.strip().lower() or "json"
 
     def is_configured(self) -> bool:
         return bool(self.url.strip())
 
     def target_description(self) -> str:
-        return self.url
+        return f"{self.url} ({self.body_format})"
 
     def _deliver(self, alert: Dict[str, Any]) -> DispatchResult:
-        body = json.dumps(alert, default=str).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        if self.body_format == "text":
+            body = format_alert_text(alert).encode("utf-8")
+            headers = {"Content-Type": "text/plain; charset=utf-8"}
+            # Consumed by ntfy/Gotify as the notification headline; ignored by
+            # any receiver that does not know them.
+            priority = str(alert.get("priority", "ALERT"))
+            facility = alert.get("facility_name") or "unmapped location"
+            headers["Title"] = f"{priority}: {facility}"[:120]
+            headers["Priority"] = "5" if priority.startswith("P0") else "3"
+            headers["Tags"] = "fire"
+        else:
+            body = json.dumps(alert, default=str).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+
         if self.secret:
             headers["X-SIH-Signature"] = hmac.new(
                 self.secret.encode("utf-8"), body, hashlib.sha256
