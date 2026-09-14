@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sih-dashboard",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "D:/industrial-fire-classifier/run_dashboard.cmd"
+      ],
+      "port": 8077
+    }
+  ]
+}

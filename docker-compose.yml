@@ -1,0 +1,35 @@
+# PostGIS service for Project SIH26162.
+#
+# The application's primary datastore. PostGIS is required rather than merely
+# supported: incident geometry is stored as geometry(Point, 4326) with a GiST
+# index, and the proximity endpoints are served by ST_DWithin rather than a
+# table scan.
+#
+#   docker compose up -d db
+#
+# POSTGRES_PASSWORD is read from .env (gitignored). The default below is a
+# local-development value only and must not be used for any deployment that is
+# reachable from another host.
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: sih26162-postgis
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sih26162}
+      POSTGRES_USER: ${POSTGRES_USER:-sih}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sih_local_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Without a healthcheck the container reports "running" while the server
+      # is still starting, and the first connection fails.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sih} -d ${POSTGRES_DB:-sih26162}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  pgdata:

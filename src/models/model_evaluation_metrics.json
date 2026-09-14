@@ -1,0 +1,202 @@
+{
+  "run": {
+    "run_id": "20260913T191719Z-15d55e3d",
+    "trained_at_utc": "2026-09-13T19:20:02.296944+00:00",
+    "labelling_rule_version": 8
+  },
+  "frp_thresholds": {
+    "persistent_gate_mw_diagnostic_only": 5.2,
+    "artifact_floor_mw": 3.0,
+    "artifact_floor_harvest_mw": 1.59,
+    "artifact_floor_forest_mw": 0.82,
+    "basis": "PERCENTILE_LOCAL",
+    "n_samples": 1858476,
+    "percentiles": {
+      "persistent_gate": 60.0,
+      "artifact_floor": 35.0,
+      "artifact_floor_harvest": 15.0,
+      "artifact_floor_forest": 5.0
+    }
+  },
+  "label_provenance": {
+    "real_detections_heuristic_labelled": 2044295,
+    "synthetic_augmented": 0,
+    "verified_ground_truth": 0,
+    "labelling_rule": "weak_label_real_detection() - recurrence-first heuristic"
+  },
+  "caveats": [
+    "No verified per-detection ground truth exists for this corpus. Labels for real detections are rule-derived and labels for augmented rows are synthetic, so the headline test scores below measure internal consistency, NOT field accuracy.",
+    "Prefer spatial_block_cv.mean_macro_f1 over the random-split score when discussing generalization: detections cluster spatially, so a random split puts the same facility on both sides of the partition. Note that spatial CV still scores against rule-derived labels, so it measures transferability of the rule, not correctness of the rule.",
+    "See circularity_audit for how much of the score survives when the features used by the labelling rule are removed.",
+    "Validating against confirmed incidents (e.g. the Baghjan blowout) is the outstanding work required before any accuracy claim is defensible.",
+    "If class_balance.status is APPLIED, majority classes were subsampled. Predicted probabilities then over-represent rare classes relative to the world and would need recalibration before being read as likelihoods; rank ordering and the confusion matrix remain valid."
+  ],
+  "best_iteration": 249,
+  "test_log_loss": 0.0024,
+  "test_macro_f1": 0.997,
+  "test_weighted_f1": 0.9989,
+  "accidental_fire_recall": 0.9999,
+  "provenance_slice": {
+    "real_detection_macro_f1": 0.997,
+    "real_detection_n": 306645,
+    "synthetic_macro_f1": null,
+    "synthetic_n": 0
+  },
+  "baselines": {
+    "dummy_majority_macro_f1": 0.205,
+    "logistic_regression_macro_f1": 0.8342
+  },
+  "slice_analysis": {
+    "day_macro_f1": 0.9964,
+    "night_macro_f1": 0.9986
+  },
+  "classification_report": {
+    "PERSISTENT_BASELINE": {
+      "precision": 0.9999704308229102,
+      "recall": 0.9989366101494653,
+      "f1-score": 0.9994532531437944,
+      "support": 33854.0
+    },
+    "ACCIDENTAL_FIRE": {
+      "precision": 0.9798785894550167,
+      "recall": 0.9999303960464955,
+      "f1-score": 0.9898029488769464,
+      "support": 14367.0
+    },
+    "AGRICULTURAL_BURN": {
+      "precision": 0.9999013315541689,
+      "recall": 0.9986813331205947,
+      "f1-score": 0.9992909599744558,
+      "support": 213094.0
+    },
+    "TRANSIENT_HOTSPOT": {
+      "precision": 0.9995146809026936,
+      "recall": 0.9995367306419589,
+      "f1-score": 0.9995257056507209,
+      "support": 45330.0
+    },
+    "accuracy": 0.9988944871105023,
+    "macro avg": {
+      "precision": 0.9948162581836975,
+      "recall": 0.9992712674896286,
+      "f1-score": 0.9970182169114793,
+      "support": 306645.0
+    },
+    "weighted avg": {
+      "precision": 0.9989136933304055,
+      "recall": 0.9988944871105023,
+      "f1-score": 0.9988990443685335,
+      "support": 306645.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      33818,
+      36,
+      0,
+      0
+    ],
+    [
+      1,
+      14366,
+      0,
+      0
+    ],
+    [
+      0,
+      259,
+      212813,
+      22
+    ],
+    [
+      0,
+      0,
+      21,
+      45309
+    ]
+  ],
+  "feature_names": [
+    "frp",
+    "bright_ti4",
+    "bright_ti5",
+    "temp_diff",
+    "frp_density",
+    "ti4_ratio",
+    "detection_confidence",
+    "dist_to_industrial_km",
+    "n_30d",
+    "mu_frp",
+    "z_frp",
+    "frp_ratio",
+    "hour_utc",
+    "month",
+    "dnbr",
+    "onset_lag_days",
+    "n_24h",
+    "burst_ratio",
+    "neighbourhood_active_keys",
+    "inside_industrial",
+    "is_exact_match",
+    "is_night",
+    "is_harvest_season",
+    "dnbr_available",
+    "in_forest",
+    "fac_steel_metallurgy",
+    "fac_petrochemical_refinery",
+    "fac_brick_kiln",
+    "fac_power_thermal",
+    "fac_general_industrial",
+    "fac_mining",
+    "fac_renewable_non_thermal",
+    "fac_non_industrial"
+  ],
+  "class_balance": {
+    "status": "NOT_NEEDED",
+    "original_ratio": 14.8,
+    "cap": 4789050
+  },
+  "spatial_block_cv": {
+    "status": "OK",
+    "scored_on": "real_detections_only",
+    "n_blocks": 41,
+    "n_folds_scored": 5,
+    "block_degrees": 5.0,
+    "mean_macro_f1": 0.9961,
+    "std_macro_f1": 0.0013,
+    "min_macro_f1": 0.9949,
+    "fold_macro_f1": [
+      0.9964,
+      0.9949,
+      0.995,
+      0.9985,
+      0.9956
+    ],
+    "mean_accidental_recall": 0.9954,
+    "reference_mean_macro_f1_all_rows": 0.9961,
+    "note": "mean_macro_f1 scores only real FIRMS detections in held-out geographic blocks. reference_mean_macro_f1_all_rows includes synthetic rows and is inflated by their separability - it is recorded for comparison only."
+  },
+  "circularity_audit": {
+    "scored_on": "real_detections_only",
+    "n_scored": 511074,
+    "ablated_features": [
+      "frp",
+      "frp_density",
+      "n_30d",
+      "z_frp",
+      "frp_ratio",
+      "month",
+      "onset_lag_days",
+      "n_24h",
+      "burst_ratio",
+      "neighbourhood_active_keys",
+      "inside_industrial",
+      "is_exact_match",
+      "is_harvest_season",
+      "in_forest"
+    ],
+    "full_feature_macro_f1": 0.9976,
+    "ablated_macro_f1": 0.7345,
+    "delta": 0.2631,
+    "interpretation": "Partial independence. The model retains real signal without the label-rule features but leans on them substantially."
+  }
+}

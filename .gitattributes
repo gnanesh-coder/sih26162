@@ -1,0 +1,12 @@
+# One line-ending convention across the team. Without this, a Windows clone
+# and a WSL/Linux clone produce diffs on every file that touches either.
+* text=auto eol=lf
+
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+*.parquet binary
+*.pbf     binary
+*.sqlite  binary
+*.zip     binary
+*.shp     binary
