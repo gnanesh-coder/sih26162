@@ -46,3 +46,7 @@ data/*.sqlite.bak*
 Thumbs.db
 .idea/
 .vscode/
+
+# Local editor / tooling config. .claude/launch.json is the dev-server entry
+# for the browser preview -- useful on this machine, noise in a shared repo.
+.claude/
