@@ -1737,6 +1737,67 @@ promise the *type* does not keep. Converting to `timestamptz` is a four-column
 schema migration, deferred rather than done, and recorded here so it is not
 mistaken for an oversight.
 
+### 6b.5b Every Detection Is Classified
+
+The incident seeding path was gated on `inside_industrial`: only detections
+inside a mapped industrial polygon reached the model. It read as a sensible
+cost optimisation and it had a consequence nobody had looked at.
+
+**A crop burn is by definition not inside an industrial polygon.** So
+`AGRICULTURAL_BURN` was filtered out before the classifier ever saw it, and
+`FOREST_FIRE` was unreachable for the same reason, being an upgrade applied to
+`AGRICULTURAL_BURN`. The model holds 207,521 agricultural training examples and
+had no live path to ever predict one. **Two of five classes were structurally
+absent from the running system**, which is visible the moment the class
+distribution is read rather than assumed:
+
+| Class | Gated | Ungated |
+| :--- | ---: | ---: |
+| `NOT_ASSESSED` | 2,189 (66.8%) | **0** |
+| `TRANSIENT_HOTSPOT` | 425 | 472 (45.6%) |
+| `PERSISTENT_BASELINE` | 651 | 321 (31.0%) |
+| **`AGRICULTURAL_BURN`** | **0** | **227 (22.0%)** |
+| **`FOREST_FIRE`** | **0** | **8 (0.8%)** |
+| `ACCIDENTAL_FIRE` | 10 | 6 (0.6%) |
+
+What replaces the gate is a cheaper split rather than a cheaper filter:
+**predict everything, and spend TreeSHAP only on what becomes an alert.**
+Attribution costs ~30 ms per detection -- measured -- and is worth it for
+something a human will open, not for background thermal activity nobody will
+click. `ExplainabilityEngine.predict_detection()` is the cheap path and applies
+the same prior correction as the full one.
+
+The serving guards matter far more without the gate, and are now applied at
+seed time rather than only at `/classify`. Classifying everything means solar
+farms, forest and cropland all reach a model that is coordinate-free by design
+and trained on an entirely Indian corpus -- exactly the cases it cannot judge
+for itself. The eight `FOREST_FIRE` rows above are guard upgrades; before this,
+the guards never ran in the seeding path at all.
+
+**A second fabrication was found in the same block.** The exception fallback
+set `PERSISTENT_BASELINE` or `ACCIDENTAL_FIRE` by state-machine guess with a
+hard-coded `conf = 0.95` -- the same invention `CONTROLLED_PROCESS` carried,
+in a rarer branch where it would have been harder to notice. A failed
+classification now records `NOT_ASSESSED` with a null confidence and names the
+exception.
+
+#### Confidence must not round up into certainty
+
+88.6% of classified rows reported **exactly 100%**. Two separate things, and
+only one was a defect.
+
+The saturation is real: a typical raw probability here is **0.9996**, because
+the model reproduces a *deterministic* labelling rule, so the decision boundary
+is sharp and softmax saturates. Spatial-block CV macro F1 of 0.9983 against
+those labels is the same fact stated differently.
+
+The rounding was the defect. `round(99.96222, 1)` is `100.0`, so a model
+expressing 0.9996 was displayed as certain. `_confidence_percent()` now floors
+anything short of an exact 1.0 at **99.9%**. The change is cosmetically tiny
+and the distinction is the entire point: 99.9% is a very confident model, 100%
+is a model that cannot be wrong. After the fix, **zero of 1,034 rows claim
+certainty**, and the range is 0.967 to 0.999.
+
 ### 6b.6 Running it
 
 ```bash

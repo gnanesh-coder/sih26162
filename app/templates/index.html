@@ -1712,6 +1712,50 @@
     let chartFrpDist, chartFacilityTypes, chartAlertPriorities, chartAlertStates;
     let chartsData = null;
 
+    /*
+      Map geometry guards.
+
+      Leaflet caches its container size. Asking it to recompute -- or to move --
+      while the container is 0x0 makes it derive a centre from a division by
+      zero, and the resulting `Invalid LatLng object: (NaN, NaN)` is thrown once
+      per animation frame until layout settles.
+
+      These were once one guarded helper private to the ResizeObserver, plus
+      four bare `setTimeout(() => map.invalidateSize())` calls at the toggle
+      sites. The comment below the observer predicted the outcome: "a
+      hand-maintained list of setTimeout calls at every toggle site eventually
+      drifts out of step", and it did -- nine NaN errors per load, from the
+      four callers that never got the guard. Both helpers now live at module
+      scope so there is one place to be correct.
+    */
+    function mapHasArea() {
+      if (typeof map === 'undefined' || !map) return false;
+      const el = map.getContainer();
+      return !!el && el.clientWidth > 0 && el.clientHeight > 0;
+    }
+
+    function resizeMapIfVisible() {
+      if (!mapHasArea()) return;
+      map.invalidateSize({ animate: false });
+    }
+
+    /* Moving a zero-area map NaNs the same way recomputing one does. When the
+       map has no area yet the target is remembered and applied by the next
+       resize, so a deep link or an auto-selected incident still lands. */
+    let _pendingView = null;
+
+    function flyToIfVisible(latlng, zoom, opts) {
+      if (!mapHasArea()) { _pendingView = { latlng, zoom, opts }; return; }
+      map.flyTo(latlng, zoom, opts);
+    }
+
+    function applyPendingView() {
+      if (!_pendingView || !mapHasArea()) return;
+      const { latlng, zoom, opts } = _pendingView;
+      _pendingView = null;
+      map.flyTo(latlng, zoom, opts);
+    }
+
     window.addEventListener('DOMContentLoaded', async () => {
       applyTheme(document.documentElement.getAttribute('data-theme') || 'dark');
       startUtcClock();
@@ -1738,18 +1782,11 @@
         `Invalid LatLng object: (NaN, NaN)` in the console on every load. The
         map was fine either way, which is what made it easy to leave.
       */
-      function resizeMapIfVisible() {
-        if (!map) return;
-        const el = map.getContainer();
-        if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
-        map.invalidateSize({ animate: false });
-      }
-
       if (stage && 'ResizeObserver' in window) {
         let pending;
         new ResizeObserver(() => {
           clearTimeout(pending);
-          pending = setTimeout(resizeMapIfVisible, 60);
+          pending = setTimeout(() => { resizeMapIfVisible(); applyPendingView(); }, 60);
         }).observe(stage);
       }
       window.addEventListener('resize', resizeMapIfVisible);
@@ -1798,7 +1835,7 @@
       try { localStorage.setItem('sih-theme', mode); } catch (e) { /* private window */ }
       // Leaflet tiles and the deck canvas sit on a painted ground; nudge the
       // map so it repaints against the new one.
-      if (typeof map !== 'undefined' && map) setTimeout(() => map.invalidateSize(), 60);
+      setTimeout(resizeMapIfVisible, 60);
     }
 
     function toggleTheme() {
@@ -2273,7 +2310,7 @@
       switchMode('live-surveillance');
       setTimeout(() => {
         if (map) {
-          map.flyTo([lat, lon], 11);
+          flyToIfVisible([lat, lon], 11);
           L.circleMarker([lat, lon], {
             radius: 9, color: 'var(--p0-ink)', weight: 2,
             fillColor: 'var(--p0-ink)', fillOpacity: 0.15, dashArray: '3 3'
@@ -2393,7 +2430,7 @@
           'hidden', shell.dataset.rail !== 'collapsed');
         if (map) setTimeout(() => {
           const el = map.getContainer();
-          if (el && el.clientWidth && el.clientHeight) map.invalidateSize();
+          resizeMapIfVisible();
         }, 200);
       } else {
         shell.dataset.rail = 'collapsed';
@@ -2784,17 +2821,17 @@
       document.getElementById('left-rail-trigger').classList.toggle('hidden', collapsed);
       const hud = document.getElementById('simulation-sandbox-hud');
       if (hud) hud.style.left = collapsed ? 'calc(var(--rail-w) + 12px)' : '12px';
-      if (map) setTimeout(() => map.invalidateSize(), 320);
+      setTimeout(resizeMapIfVisible, 320);
     }
 
     function openDossierPanel() {
       document.getElementById('shell').dataset.dossier = 'open';
-      if (map) setTimeout(() => map.invalidateSize(), 320);
+      setTimeout(resizeMapIfVisible, 320);
     }
     function closeDossierPanel() {
       document.getElementById('shell').dataset.dossier = 'closed';
       if (plumeLayerGroup) plumeLayerGroup.clearLayers();
-      if (map) setTimeout(() => map.invalidateSize(), 320);
+      setTimeout(resizeMapIfVisible, 320);
     }
 
     /*
@@ -3337,7 +3374,7 @@
         activeCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       }
 
-      map.flyTo([inc.latitude, inc.longitude], Math.max(map.getZoom(), 11), { duration: 0.8 });
+      flyToIfVisible([inc.latitude, inc.longitude], Math.max(map.getZoom(), 11), { duration: 0.8 });
 
       if (openDrawer) {
         openDossierPanel();
@@ -3363,10 +3400,14 @@
       document.getElementById('dossier-status').textContent = inc.status || 'OPEN';
       document.getElementById('dossier-prediction-label').textContent = inc.predicted_class || 'ACCIDENTAL FIRE';
 
-      // A row that was never sent to the classifier has no confidence, and
-      // the gauge says so rather than falling back to 95%. NOT_ASSESSED rows
-      // are 74% of the table; every one of them used to display a hard-coded
-      // 99% attributed in prose to "THERMOSCOPE AI", which had not run.
+      // A row with no confidence renders as absent, not as 95%.
+      //
+      // NOT_ASSESSED was 74% of the table when the classifier was gated on
+      // inside_industrial, and every one of those rows displayed a hard-coded
+      // 99% attributed in prose to "THERMOSCOPE AI", which had not run. The
+      // gate is gone and the class is now empty in practice -- it survives
+      // only for a detection whose classification genuinely raised. The guard
+      // stays because that path still exists.
       const scored = inc.confidence !== null && inc.confidence !== undefined;
       const confPct = scored ? Math.round(inc.confidence * 100) : null;
       const arc = document.getElementById('dossier-gauge-arc');

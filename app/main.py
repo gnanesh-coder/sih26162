@@ -222,58 +222,86 @@ def seed_database_from_parquet(db: Session, parquet_path: Path = OUTPUT_PROCESSE
         priority = str(row.get("priority", "NON_ALERT"))
         state = str(row.get("state", "TRANSIENT_SUSPICION"))
 
-        # For industrial detections, compute model prediction & TreeSHAP narrative
-        if inside_ind:
-            try:
-                sample_dict = {
-                    "frp": frp,
-                    "bright_ti4": ti4 if ti4 else 350.0,
-                    "bright_ti5": ti5 if ti5 else 295.0,
-                    "scan": float(row.get("scan", 0.4)),
-                    "track": float(row.get("track", 0.4)),
-                    "daynight": str(row.get("daynight", "D")),
-                    "timestamp_utc": ts.isoformat(),
-                    "inside_industrial": True,
-                    "is_exact_match": bool(row.get("is_exact_match", False)),
-                    "dist_to_industrial_km": dist_km,
-                    "facility_type": fac_type,
-                    "n_30d": int(row.get("n_30d", 0)),
-                    "mu_frp": float(row.get("mu_frp", frp)),
-                    "z_frp": float(row.get("z_frp", 0.0)),
-                    "frp_ratio": float(row.get("frp_ratio", 1.0)),
-                }
-                explainer_inst = get_explainer()
+        # Every detection is classified.
+        #
+        # This used to be gated on `inside_ind`, so only detections inside a
+        # mapped industrial polygon reached the model. The gate was a cost
+        # optimisation and it had a consequence nobody had looked at: a crop
+        # burn is by definition NOT inside an industrial polygon, so
+        # AGRICULTURAL_BURN was filtered out before the classifier ever saw it.
+        # The model holds 207,521 agricultural training examples and had no
+        # live path to ever predict one. FOREST_FIRE was unreachable for the
+        # same reason, being an upgrade applied to AGRICULTURAL_BURN.
+        #
+        # Two of five classes were structurally absent from the running system.
+        #
+        # What replaces the gate is a cheaper split rather than a cheaper
+        # filter: predict everything, and spend TreeSHAP only on what becomes
+        # an alert. Attribution costs ~30 ms and is worth it for a detection a
+        # human will open; it is not worth it for background thermal activity
+        # nobody will ever click.
+        alerting = priority in ("P0_EMERGENCY", "P1_ALERT", "P2_ADVISORY")
+        try:
+            sample_dict = {
+                "frp": frp,
+                "bright_ti4": ti4 if ti4 else 350.0,
+                "bright_ti5": ti5 if ti5 else 295.0,
+                "scan": float(row.get("scan", 0.4)),
+                "track": float(row.get("track", 0.4)),
+                "daynight": str(row.get("daynight", "D")),
+                "timestamp_utc": ts.isoformat(),
+                "inside_industrial": inside_ind,
+                "is_exact_match": bool(row.get("is_exact_match", False)),
+                "dist_to_industrial_km": dist_km,
+                "facility_type": fac_type,
+                "n_30d": int(row.get("n_30d", 0)),
+                "mu_frp": float(row.get("mu_frp", frp)),
+                "z_frp": float(row.get("z_frp", 0.0)),
+                "frp_ratio": float(row.get("frp_ratio", 1.0)),
+            }
+            explainer_inst = get_explainer()
+            if alerting:
                 exp = explainer_inst.explain_detection(sample_dict)
-                pred_class = exp["predicted_class"]
-                conf = exp["confidence_percent"] / 100.0
                 rationale = exp["narrative_rationale"]
-            except Exception as e:
-                logger.warning("Explanation failed for detection %s (%s). Falling back to state machine.", det_id, e)
-                pred_class = "PERSISTENT_BASELINE" if state == "PERSISTENT_BASELINE" else "ACCIDENTAL_FIRE"
-                conf = 0.95
-                rationale = str(row.get("rationale", "Industrial Hotspot"))
-        else:
-            # Not model-scored, and the row says so.
-            #
-            # This branch skips the explainer entirely: a detection outside any
-            # mapped industrial polygon is background thermal activity and the
-            # pipeline does not spend inference on it. That is a legitimate
-            # optimisation; what was not legitimate was the label it wrote.
-            #
-            # It used to set predicted_class="CONTROLLED_PROCESS" with a
-            # hard-coded confidence of 0.99 -- a name that contradicted its own
-            # rationale string (a background hotspot is not a controlled
-            # industrial process), a class absent from CLASS_NAMES and from the
-            # documentation, and a confidence figure the model never produced,
-            # on 74% of all rows.
+            else:
+                exp = explainer_inst.predict_detection(sample_dict)
+                rationale = str(row.get(
+                    "rationale",
+                    "Classified without SHAP attribution: suppressed as "
+                    "routine, so the per-factor explanation is computed on "
+                    "demand rather than for every background detection.",
+                ))
+            model_class = exp["predicted_class"]
+            conf = exp["confidence_percent"] / 100.0
+
+            # The guards matter far more now than they did behind the gate.
+            # Classifying everything means solar farms, forest and cropland
+            # all reach the model, and those are exactly the cases it
+            # cannot judge for itself: it is coordinate-free by design and
+            # its corpus is entirely Indian. An override is recorded in the
+            # rationale rather than applied silently.
+            pred_class, guard_note = apply_serving_guards(
+                model_class, lat=lat, lon=lon, facility_type=fac_type,
+            )
+            if guard_note:
+                rationale = f"{rationale} [serving guard] {guard_note}"
+
+        except Exception as e:
+            # A classifier that failed did not produce a class, and must not be
+            # made to look as though it did. The previous version fell back to
+            # a state-machine guess with a hard-coded 0.95 confidence -- the
+            # same fabrication that CONTROLLED_PROCESS carried, in a rarer
+            # branch where it would have been harder to notice.
+            logger.warning(
+                "Classification failed for detection %s (%s). Recording it as "
+                "NOT_ASSESSED rather than guessing.", det_id, e,
+            )
             pred_class = "NOT_ASSESSED"
             conf = None
-            rationale = str(row.get(
-                "rationale",
-                "Outside any mapped industrial polygon. Not submitted to the "
-                "classifier: background thermal activity is filtered before "
-                "inference, so no class and no confidence were computed.",
-            ))
+            rationale = (
+                f"Classification failed ({type(e).__name__}). No class and no "
+                "confidence were computed for this detection."
+            )
 
         incident = Incident(
             detection_id=det_id,

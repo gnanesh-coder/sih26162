@@ -40,6 +40,23 @@ logging.basicConfig(
 )
 
 
+def _confidence_percent(probability: float) -> float:
+    """Percent confidence that never rounds up into a claim of certainty.
+
+    The model reproduces a deterministic labelling rule, so its decision
+    boundary is sharp and softmax saturates: a typical maximum here is
+    0.9996. `round(99.96222, 1)` is 100.0, and displaying 100% asserts a
+    certainty the model did not express -- on 88.6% of rows, as measured.
+
+    Anything short of an exact 1.0 is therefore floored at 99.9%. The change
+    is cosmetically tiny and the distinction is the whole point: 99.9% is a
+    very confident model, 100% is a model that cannot be wrong.
+    """
+    if probability >= 1.0:
+        return 100.0
+    return float(min(round(probability * 100.0, 1), 99.9))
+
+
 class FireExplainer:
     """Provides game-theoretic SHAP explanations for XGBoost fire classification decisions."""
 
@@ -112,6 +129,33 @@ class FireExplainer:
 
         return importance_df
 
+    def predict_detection(self, hotspot_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Class and calibrated confidence, without the SHAP attribution.
+
+        `explain_detection` costs about 30 ms per detection and almost all of
+        it is TreeSHAP. That is the right price for something a human is going
+        to read, and the wrong price for the roughly two thousand background
+        detections per refresh that nobody will ever open.
+
+        The split is: predict everything, explain what becomes an alert. The
+        prior correction is applied here exactly as it is there -- raw
+        probabilities are calibrated to the subsampled corpus, where the rare
+        classes are roughly 50x over-represented, so reporting them unshifted
+        would overstate a P0 call substantially.
+        """
+        df_single = pd.DataFrame([hotspot_dict])
+        X_single = self.pipeline.transform(df_single)
+
+        raw_probs = self.model.predict_proba(X_single)[0]
+        probs = apply_prior_correction(raw_probs)
+        pred_class_idx = int(np.argmax(probs))
+
+        return {
+            "predicted_class": CLASS_NAMES.get(pred_class_idx, "UNKNOWN"),
+            "predicted_class_id": pred_class_idx,
+            "confidence_percent": _confidence_percent(probs[pred_class_idx]),
+        }
+
     def explain_detection(self, hotspot_dict: Dict[str, Any], top_k: int = 4) -> Dict[str, Any]:
         """Produces local decision explanation for an individual thermal hotspot detection.
 
@@ -135,7 +179,7 @@ class FireExplainer:
         probs = apply_prior_correction(raw_probs)
         pred_class_idx = int(np.argmax(probs))
         pred_class_name = CLASS_NAMES.get(pred_class_idx, "UNKNOWN")
-        confidence_pct = float(round(probs[pred_class_idx] * 100.0, 1))
+        confidence_pct = _confidence_percent(probs[pred_class_idx])
         uncorrected_pct = float(round(raw_probs[int(np.argmax(raw_probs))] * 100.0, 1))
 
         # Compute SHAP values for this single sample

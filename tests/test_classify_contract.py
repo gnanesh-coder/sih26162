@@ -142,9 +142,19 @@ def test_unscored_detections_are_not_given_a_class_or_a_confidence():
     assigned 99% confidence", crediting a model that had not run.
     """
     src = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "CONTROLLED_PROCESS" not in src.replace(
-        '# It used to set predicted_class="CONTROLLED_PROCESS" with a', ""
-    ), "the retired class name is back in a live code path"
+
+    # Check assignments, not raw occurrences. The retired name is legitimately
+    # mentioned in comments explaining why it was retired, and an earlier
+    # version of this test stripped one specific comment line by exact text --
+    # which broke the moment that comment was reworded, reporting a regression
+    # where there was none.
+    code = [
+        line for line in src.splitlines()
+        if not line.lstrip().startswith("#") and not line.lstrip().startswith('"')
+    ]
+    assert not any('pred_class = "CONTROLLED_PROCESS"' in l for l in code), (
+        "the retired class name is being assigned again"
+    )
     assert 'pred_class = "NOT_ASSESSED"' in src
     assert "conf = None" in src
 
@@ -179,3 +189,32 @@ def test_ui_offers_only_classes_the_system_can_produce():
     offered = set(re.findall(r'<option value="([A-Z_]+)"', ui))
     allowed = set(CLASS_NAME_TO_INDEX) | SERVED_ONLY_CLASSES
     assert offered <= allowed, f"dropdown offers unknown classes: {offered - allowed}"
+
+
+# ---------------------------------------------------------------------------
+# Confidence must not round up into certainty
+# ---------------------------------------------------------------------------
+
+from src.models.explainability import _confidence_percent  # noqa: E402
+
+
+def test_high_confidence_never_displays_as_certainty():
+    """The measured case: raw probability 0.9996222 on 88.6% of rows.
+
+    `round(99.96222, 1)` is 100.0, so the dashboard displayed certainty for a
+    model that had expressed 0.9996. Very confident and cannot-be-wrong are
+    different claims, and only one of them is true.
+    """
+    assert _confidence_percent(0.9996222) == 99.9
+    assert _confidence_percent(0.99999) == 99.9
+
+
+def test_an_exact_one_is_still_reported_as_one():
+    """Flooring must not lie in the other direction."""
+    assert _confidence_percent(1.0) == 100.0
+
+
+def test_ordinary_confidences_are_unchanged():
+    assert _confidence_percent(0.873) == 87.3
+    assert _confidence_percent(0.5) == 50.0
+    assert _confidence_percent(0.0) == 0.0
