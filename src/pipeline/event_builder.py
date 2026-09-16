@@ -197,6 +197,22 @@ class _Segment:
         return self.key.startswith("fac:")
 
 
+def parse_detection_time(df: pd.DataFrame) -> pd.Series:
+    """Detection timestamps, from whichever time column the frame carries.
+
+    `timestamp_utc` is preferred and `acq_date` is the fallback, tried per row
+    rather than per frame -- a corpus can carry both columns with one of them
+    null, and picking a column up front would then discard a usable time.
+    `attach_verified_labels` and `_detection_month` already accept either, so
+    this keeps the builder no stricter than its callers.
+    """
+    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]")
+    for column in ("timestamp_utc", "acq_date"):
+        if column in df.columns:
+            out = out.fillna(pd.to_datetime(df[column], utc=True, errors="coerce"))
+    return out
+
+
 def _detection_identity(df: pd.DataFrame) -> pd.Series:
     """A stable per-detection string, for hashing an event id.
 
@@ -218,7 +234,7 @@ def _detection_identity(df: pd.DataFrame) -> pd.Series:
     parts = [
         df["latitude"].astype(float).round(5).map(str),
         df["longitude"].astype(float).round(5).map(str),
-        pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce").map(str),
+        parse_detection_time(df).map(str),
     ]
     if "satellite" in df.columns:
         parts.append(df["satellite"].map(str))
@@ -400,16 +416,24 @@ def assign_events(
         out["event_id"] = pd.Series(dtype=str)
         return out
 
-    required = {"latitude", "longitude", "timestamp_utc"}
-    missing = required - set(df.columns)
+    missing = {"latitude", "longitude"} - set(df.columns)
+    # Either time column will do, and both are tried per row rather than per
+    # frame: `attach_verified_labels` and `_detection_month` already accept
+    # timestamp_utc or acq_date, and a builder stricter than its callers would
+    # reject frames the rest of the project handles.
+    time_cols = [c for c in ("timestamp_utc", "acq_date") if c in df.columns]
+    if not time_cols:
+        missing.add("timestamp_utc or acq_date")
     if missing:
         raise ValueError(
-            f"assign_events needs {sorted(required)}; missing {sorted(missing)}"
+            f"assign_events needs latitude, longitude and a time column; "
+            f"missing {sorted(missing)}"
         )
 
     work = df.copy()
     work["_key"] = _ensure_recurrence_key(work, config.persistence_resolution)
-    work["_ts"] = pd.to_datetime(work["timestamp_utc"], utc=True, errors="coerce")
+
+    work["_ts"] = parse_detection_time(work)
     work["_ident"] = _detection_identity(work)
 
     # A row with no usable timestamp cannot be placed in time, so it cannot be

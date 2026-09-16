@@ -54,6 +54,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 
+from src.pipeline.event_builder import parse_detection_time
+
 logger = logging.getLogger("event_features")
 
 EARTH_RADIUS_KM = 6371.0088
@@ -153,7 +155,7 @@ def event_identity_frame(detections: pd.DataFrame) -> pd.DataFrame:
         )
 
     work = detections.copy()
-    work["_ts"] = pd.to_datetime(work["timestamp_utc"], utc=True, errors="coerce")
+    work["_ts"] = parse_detection_time(work)
     grouped = work.groupby("event_id", sort=True)
     return pd.DataFrame(
         {
@@ -299,7 +301,7 @@ def build_event_features(detections: pd.DataFrame) -> pd.DataFrame:
         )
 
     work = detections.copy()
-    work["_ts"] = pd.to_datetime(work["timestamp_utc"], utc=True, errors="coerce")
+    work["_ts"] = parse_detection_time(work)
 
     rows: List[Dict] = [
         _one_event(str(event_id), group)

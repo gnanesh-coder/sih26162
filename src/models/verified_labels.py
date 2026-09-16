@@ -1109,6 +1109,153 @@ def evaluate_against_verified(
     return result
 
 
+def evaluate_events_against_verified(
+    detections: pd.DataFrame,
+    model,
+    pipeline,
+    events: Optional[List[VerifiedEvent]] = None,
+    min_support: int = 10,
+    config=None,
+) -> Dict:
+    """Scores verified labels one event at a time, not one pixel at a time.
+
+    WHY THIS EXISTS ALONGSIDE evaluate_against_verified
+    ---------------------------------------------------
+    The register defines 21 *events*, each with a space-time window and a
+    citation. `evaluate_against_verified` then scores every detection inside
+    those windows and averages. Jharia supplies 23,633 of them and Buncefield
+    supplies 5, so the headline number is dominated by whichever verified event
+    happens to be largest -- and the largest are the persistent industrial sites
+    the system already classifies well.
+
+    Scoring per event gives every citation one vote. That is a different
+    question, and a harder one: it asks whether the system got *this fire*
+    right, which is what an incident commander and an evaluator both mean.
+
+    Both numbers are returned. Neither replaces the other, and the detection-
+    weighted figure is kept so published results stay comparable.
+
+    WHAT THE PREDICTION IS, AND WHAT IT IS NOT
+    ------------------------------------------
+    The trained model is still per-detection, so an event's predicted class is
+    the plurality of its detections' predictions. **That is not an event-level
+    model**, and this function must not be quoted as evaluating one. It measures
+    the current per-detection model read at event granularity, which is the
+    honest interim position until a model trained on event features exists.
+
+    GROUPING PURITY IS REPORTED, NOT HIDDEN
+    ---------------------------------------
+    Every number here is conditional on the event boundaries being right. If
+    grouping merged two verified events into one, accuracy would quietly absorb
+    the damage. So `purity` -- the share of an event's labelled detections
+    agreeing with the truth assigned to it -- is computed and returned, and a
+    mean purity well below 1.0 means the grouping is wrong rather than the
+    classifier.
+    """
+    from sklearn.metrics import confusion_matrix, f1_score
+
+    from src.pipeline.event_builder import assign_events
+
+    events = events if events is not None else load_verified_events()
+    tagged = attach_verified_labels(detections, events)
+    grouped = assign_events(tagged, config)
+
+    labelled = grouped[grouped["verified_label"].notna()].copy()
+    if labelled.empty:
+        return {
+            "status": "NO_VERIFIED_MATCHES",
+            "detail": (
+                "No detection fell inside a verified event window, so no built "
+                "event could be scored. Extend data/reference/verified_events.csv."
+            ),
+            "n_events": len(events),
+        }
+
+    labelled["_pred"] = model.predict(pipeline.transform(labelled))
+
+    rows = []
+    for event_id, group in labelled.groupby("event_id", sort=True):
+        truth_counts = group["verified_label"].astype(int).value_counts()
+        truth = int(truth_counts.index[0])
+        # Purity is over the labelled detections only: an event that extends
+        # beyond a verified window is not impure, it is partly unadjudicated.
+        purity = float(truth_counts.iloc[0] / truth_counts.sum())
+
+        pred_counts = group["_pred"].astype(int).value_counts()
+        pred = int(pred_counts.index[0])
+
+        rows.append({
+            "event_id": event_id,
+            "verified_event": str(group["verified_event"].mode().iloc[0]),
+            "confidence": str(group["verified_confidence"].iloc[0]),
+            "n_detections": int(len(group)),
+            "truth": truth,
+            "pred": pred,
+            "purity": round(purity, 4),
+            "correct": truth == pred,
+        })
+
+    scored = pd.DataFrame(rows)
+    y_true = scored["truth"].to_numpy(dtype=int)
+    y_pred = scored["pred"].to_numpy(dtype=int)
+
+    # One row per citation, so a reader can see which events the register is
+    # actually carrying and how many built events each resolved into.
+    per_verified_event = {}
+    for name, grp in scored.groupby("verified_event"):
+        per_verified_event[name] = {
+            "built_events": int(len(grp)),
+            "detections": int(grp["n_detections"].sum()),
+            "accuracy": float(round(grp["correct"].mean(), 4)),
+            "mean_purity": float(round(grp["purity"].mean(), 4)),
+            "confidence": grp["confidence"].iloc[0],
+        }
+
+    impure = scored[scored["purity"] < 0.9]
+    result = {
+        "status": "OK" if len(scored) >= min_support else "LOW_SUPPORT",
+        "scored_on": "built_events",
+        "n_events_scored": int(len(scored)),
+        "n_verified_events_matched": int(scored["verified_event"].nunique()),
+        "n_detections_behind_them": int(scored["n_detections"].sum()),
+        "event_accuracy": float(round(scored["correct"].mean(), 4)),
+        "event_macro_f1": float(round(f1_score(y_true, y_pred, average="macro"), 4)),
+        "mean_grouping_purity": float(round(scored["purity"].mean(), 4)),
+        "impure_events": int(len(impure)),
+        "per_verified_event": per_verified_event,
+        "confusion_matrix": confusion_matrix(
+            y_true, y_pred, labels=sorted(CLASS_NAME_TO_INDEX.values())
+        ).tolist(),
+        "caveats": [
+            "Every verified event carries equal weight here, so this number is "
+            "not comparable with the detection-weighted macro F1 and must not be "
+            "quoted in its place.",
+            "An event's predicted class is the plurality of its detections' "
+            "predictions. The model is per-detection; this is it read at event "
+            "granularity, NOT an event-level model.",
+            "mean_grouping_purity below 1.0 means event boundaries disagree with "
+            "the register. Read it before reading the accuracy: impure grouping "
+            "makes the classifier look wrong for something it did not do.",
+        ],
+    }
+
+    if len(scored) < min_support:
+        result["detail"] = (
+            f"Only {len(scored)} built events carried a verified label "
+            f"(min_support={min_support}). Directionally useful, not a "
+            "defensible accuracy claim."
+        )
+
+    logger.info(
+        "Event-level verified evaluation: %d events over %d detections, "
+        "accuracy=%.4f, macro F1=%.4f, mean purity=%.4f",
+        result["n_events_scored"], result["n_detections_behind_them"],
+        result["event_accuracy"], result["event_macro_f1"],
+        result["mean_grouping_purity"],
+    )
+    return result
+
+
 def write_csv_template(path: Path = CSV_PATH) -> Path:
     """Writes a CSV template for analysts to extend, without overwriting data."""
     path = Path(path)

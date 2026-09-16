@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models.verified_labels import (
+    evaluate_events_against_verified,
     CLASS_NAME_TO_INDEX,
     KNOWN_UNDETECTED_INCIDENTS,
     VERIFIED_EVENTS,
@@ -391,3 +392,142 @@ class TestVerifiedRegisterSection:
                 f"{ev.name}: its source citation is not in the register. "
                 "The register is the only place a reader sees provenance."
             )
+
+
+# --------------------------------------------------------------------------
+# Event-level evaluation: one vote per citation, not one per pixel
+#
+# The register defines events; the old harness scored detections inside them.
+# Jharia supplies 23,633 and Buncefield supplies 5, so the detection-weighted
+# number answers "did we classify the biggest sites right" when the question
+# asked was "did we classify this fire right".
+# --------------------------------------------------------------------------
+
+def _timed_detections(rows):
+    """Detections with a real timestamp, so they can be grouped into events."""
+    return pd.DataFrame(rows, columns=["latitude", "longitude", "timestamp_utc"])
+
+
+def test_event_evaluation_gives_every_event_one_vote():
+    """A 100-detection event and a 1-detection event must weigh the same.
+
+    This is the whole reason the function exists. Scored per detection the
+    model below is 99% accurate; scored per event it is 50%.
+    """
+    big = VerifiedEvent(
+        name="Big persistent site", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    small = VerifiedEvent(
+        name="Small accident", lat=28.0, lon=77.0,
+        start_date="2026-03-01", end_date="2026-03-02",
+        label="ACCIDENTAL_FIRE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=3.0,
+    )
+
+    rows = [(22.0, 70.0, f"2026-03-{d:02d}T06:00:00Z") for d in range(1, 26)]
+    rows += [(28.0, 77.0, "2026-03-01T06:00:00Z")]
+
+    persistent = CLASS_NAME_TO_INDEX["PERSISTENT_BASELINE"]
+    res = evaluate_events_against_verified(
+        _timed_detections(rows), _StubModel(persistent), _StubPipeline(),
+        [big, small], min_support=1,
+    )
+
+    assert res["n_verified_events_matched"] == 2
+    # The model is right about the big site and wrong about the accident.
+    assert res["event_accuracy"] == pytest.approx(0.5)
+    assert res["per_verified_event"]["Small accident"]["accuracy"] == 0.0
+    assert res["per_verified_event"]["Big persistent site"]["accuracy"] == 1.0
+
+
+def test_event_evaluation_reports_grouping_purity():
+    """Every number here is conditional on the boundaries being right, so the
+    boundaries are measured too."""
+    event = VerifiedEvent(
+        name="Test refinery", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    rows = [(22.0, 70.0, f"2026-03-{d:02d}T06:00:00Z") for d in range(1, 8)]
+    res = evaluate_events_against_verified(
+        _timed_detections(rows), _StubModel(CLASS_NAME_TO_INDEX["PERSISTENT_BASELINE"]),
+        _StubPipeline(), [event], min_support=1,
+    )
+
+    # One verified event, one truth class: grouping cannot be impure here.
+    assert res["mean_grouping_purity"] == 1.0
+    assert res["impure_events"] == 0
+
+
+def test_event_evaluation_says_so_when_nothing_matched():
+    event = VerifiedEvent(
+        name="Test refinery", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    res = evaluate_events_against_verified(
+        _timed_detections([(10.0, 10.0, "2020-01-01T06:00:00Z")]),
+        _StubModel(0), _StubPipeline(), [event],
+    )
+
+    assert res["status"] == "NO_VERIFIED_MATCHES"
+    assert "event_accuracy" not in res
+
+
+def test_event_evaluation_flags_low_support():
+    """21 events is enough to expose defects and not enough to certify."""
+    event = VerifiedEvent(
+        name="Test refinery", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    res = evaluate_events_against_verified(
+        _timed_detections([(22.0, 70.0, "2026-03-01T06:00:00Z")]),
+        _StubModel(0), _StubPipeline(), [event], min_support=50,
+    )
+
+    assert res["status"] == "LOW_SUPPORT"
+    assert "defensible accuracy claim" in res["detail"]
+
+
+def test_event_evaluation_declares_that_it_is_not_an_event_level_model():
+    """The prediction is a plurality vote over a per-detection model. Quoting
+    this as an event-level model's score would be the fabricated measurement
+    the project refuses everywhere else."""
+    event = VerifiedEvent(
+        name="Test refinery", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    res = evaluate_events_against_verified(
+        _timed_detections([(22.0, 70.0, "2026-03-01T06:00:00Z")]),
+        _StubModel(0), _StubPipeline(), [event], min_support=1,
+    )
+
+    joined = " ".join(res["caveats"])
+    assert "NOT an event-level model" in joined
+    assert "mean_grouping_purity" in joined
+
+
+def test_event_evaluation_can_fail_the_model():
+    """A harness that cannot report a wrong answer is not a measurement."""
+    event = VerifiedEvent(
+        name="Test refinery", lat=22.0, lon=70.0,
+        start_date="2026-03-01", end_date="2026-03-31",
+        label="PERSISTENT_BASELINE", confidence="high",
+        source="Synthetic fixture used only in tests.", radius_km=5.0,
+    )
+    rows = [(22.0, 70.0, f"2026-03-{d:02d}T06:00:00Z") for d in range(1, 6)]
+    res = evaluate_events_against_verified(
+        _timed_detections(rows), _StubModel(CLASS_NAME_TO_INDEX["ACCIDENTAL_FIRE"]),
+        _StubPipeline(), [event], min_support=1,
+    )
+
+    assert res["event_accuracy"] == 0.0
