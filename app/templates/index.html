@@ -964,20 +964,53 @@
           <i class="fa-solid fa-circle-info text-[12.5px]"></i>
         </button>
         <div id="popover-legend" class="hidden absolute right-0 mt-1.5 w-80 float-panel rounded p-3.5 z-40 space-y-3.5">
+          <!--
+            Two colour systems, named separately because they answer different
+            questions. The dots on the map are a first-match cascade mixing
+            priority and class; the rail down the incident stream is the alert
+            tier alone. This section used to show only the tier swatches under a
+            heading that implied they were what the map draws -- so six of the
+            seven marker colours were undocumented, and the green swatch meant
+            "routine" here and "forest fire" out there.
+
+            Marker rows are rendered from MARKER_LEGEND, the same table
+            renderMapMarkers() colours by, so the two cannot drift apart again.
+          -->
           <div>
-            <span class="label block mb-1.5">Alert tier</span>
+            <span class="label block mb-1.5">Map markers</span>
             <p class="text-[12.5px] t3 leading-snug mb-2">
-              Colour is data. The chrome on this interface is deliberately
-              achromatic, so the only saturated pixels you see are the map and
-              these five values.
+              First rule that matches wins, and priority is tested first &mdash; an
+              emergency is crimson whatever it was classified as. The exception
+              is an accidental fire the tiering did not escalate: it keeps its
+              own darker red rather than blending into the routine colour. Dot
+              <em>size</em> is radiative power, never urgency.
+            </p>
+            <div id="legend-markers" class="space-y-1.5 text-[12px]"></div>
+            <p class="text-[11px] t3 leading-snug pt-2">
+              P1 has no colour of its own: a flare-up renders in the same orange
+              as the baseline it rose from. Read the tier off the stream rail or
+              the dossier, not the map.
+            </p>
+          </div>
+
+          <div class="hairline-t pt-3">
+            <span class="label block mb-1.5">Alert tier &middot; stream rail</span>
+            <p class="text-[12.5px] t3 leading-snug mb-2">
+              The bar under each row in the incident stream, and what decides
+              which channels an alert leaves on.
             </p>
             <div class="space-y-1.5 text-[12px]">
-              <div class="flex items-center gap-2"><span class="legend-swatch" style="background:var(--p0)"></span><span class="t1">P0 &middot; dispatch now</span><span class="ml-auto font-mono text-[12.5px] t3">email + hook<span title="The SMS adapter has no provider wired and reports NOT_IMPLEMENTED. It is routed but never delivered." style="opacity:.55"> &middot; sms*</span></span></div>
+              <div class="flex items-center gap-2"><span class="legend-swatch" style="background:var(--p0)"></span><span class="t1">P0 &middot; dispatch now</span><span class="ml-auto font-mono text-[12.5px] t3">sms + email + hook</span></div>
               <div class="flex items-center gap-2"><span class="legend-swatch" style="background:var(--p1)"></span><span class="t2">P1 &middot; alert</span><span class="ml-auto font-mono text-[12.5px] t3">email + hook</span></div>
               <div class="flex items-center gap-2"><span class="legend-swatch" style="background:var(--p2)"></span><span class="t2">P2 &middot; advisory</span><span class="ml-auto font-mono text-[12.5px] t3">webhook</span></div>
               <div class="flex items-center gap-2"><span class="legend-swatch" style="background:var(--routine)"></span><span class="t2">Routine &middot; suppressed</span><span class="ml-auto font-mono text-[12.5px] t3">logged only</span></div>
-            <p class="text-[11px] t3 leading-snug pt-1">* SMS is routed by priority but has no provider wired and reports <span class="font-mono">NOT_IMPLEMENTED</span>. A stub returning <span class="font-mono">SENT</span> would be a fabricated delivery receipt.</p>
             </div>
+            <p class="text-[11px] t3 leading-snug pt-2">
+              A channel with no provider configured reports
+              <span class="font-mono">NOT_CONFIGURED</span> and delivers nothing.
+              A stub returning <span class="font-mono">SENT</span> would be a
+              fabricated delivery receipt.
+            </p>
           </div>
           <div class="hairline-t pt-3">
             <span class="label block mb-1.5">Archive layer &middot; H3</span>
@@ -1759,6 +1792,7 @@
     window.addEventListener('DOMContentLoaded', async () => {
       applyTheme(document.documentElement.getAttribute('data-theme') || 'dark');
       startUtcClock();
+      renderMarkerLegend();
       initMap();
 
       /*
@@ -3139,33 +3173,90 @@
       renderMapMarkers();
     }
 
+    // The marker cascade, as data rather than as an if-chain.
+    //
+    // It was an if-chain, and the legend describing it was a separate block of
+    // hand-written HTML listing four colours this code never produces. Two
+    // hand-maintained lists of the same thing is one too many, so the legend is
+    // now rendered from this table and a colour cannot reach the map without
+    // reaching the legend.
+    //
+    // ORDER IS THE LOGIC: first match wins, and priority is tested before class
+    // so an emergency stays crimson whatever the classifier decided. The
+    // agricultural rule must also stay above the not-assessed one -- a crop
+    // burn is by definition outside any industrial polygon, so this order is
+    // the only thing stopping it falling through to slate.
+    const MARKER_LEGEND = [
+      { colour: '#ff2a5f', label: 'Accidental fire', note: 'P0 &middot; pulsing',
+        pulse: 'pulse-shockwave',
+        test: inc => inc.alert_priority === 'P0_EMERGENCY' },
+      // The one deliberate exception to "priority first", and the reason it is
+      // an exception: `predicted_class` is the model's answer and
+      // `alert_priority` is the state machine's, computed independently. They
+      // agree on all 13 live accidents today, but nothing enforces that. A
+      // detection the model calls an accident and the tiering did not escalate
+      // is precisely the disagreement worth seeing -- a candidate miss -- and
+      // under a strict priority-first order it would have drawn as routine
+      // orange, or fallen through to the terminal rule entirely.
+      { colour: '#b91c3c', label: 'Accidental fire, not escalated', note: 'model vs tier',
+        test: inc => inc.predicted_class === 'ACCIDENTAL_FIRE' },
+      { colour: '#f97316', label: 'Persistent baseline', note: 'flare &middot; kiln &middot; P2',
+        test: inc => inc.alert_priority === 'P2_ADVISORY' || inc.predicted_class === 'PERSISTENT_BASELINE' },
+      { colour: '#fbbf24', label: 'Mining site', note: 'by sector',
+        test: inc => (inc.facility_type || '').includes('mining') },
+      // Was 'AGRICULTURAL_STUBBLE', a class name that exists nowhere in the
+      // Python, so this branch could never fire and every crop burn fell
+      // through to the slate "never classified" colour below.
+      { colour: '#eab308', label: 'Agricultural burn', note: 'crop residue',
+        test: inc => inc.predicted_class === 'AGRICULTURAL_BURN' },
+      { colour: '#16a34a', label: 'Forest fire', note: 'land-cover guard',
+        test: inc => inc.predicted_class === 'FOREST_FIRE' },
+      // TRANSIENT_HOTSPOT had no rule of its own, so it was being caught by an
+      // `|| !inc.inside_industrial` clause on the not-assessed rule below and
+      // labelled "never classified". That clause was correct while the seeding
+      // path gated inference on `inside_ind`; once every detection was sent to
+      // the classifier it became false, and it stayed. 462 of 1,816 live rows
+      // were drawn as unassessed while carrying a class at 0.999 confidence.
+      //
+      // That is the original CONTROLLED_PROCESS defect running backwards. The
+      // first version showed a confidence the model never produced; this one
+      // denied a classification the model did produce. Both are the interface
+      // describing something other than what the system did.
+      //
+      // Muted, because a one-off with no recurrence history is the weakest
+      // reading on the map -- but muted is not the same as absent.
+      { colour: '#64748b', label: 'Transient hotspot', note: 'artifact or one-off',
+        test: inc => inc.predicted_class === 'TRANSIENT_HOTSPOT' },
+      // Kept although it currently matches nothing: the exception path in
+      // main.py still writes NOT_ASSESSED with a null confidence when the
+      // classifier itself fails, and that state must stay legible on the map.
+      // It tests the class and nothing else -- containment is not evidence that
+      // inference was skipped.
+      { colour: '#94a3b8', label: 'Not assessed', note: 'classifier did not run',
+        test: inc => inc.predicted_class === 'NOT_ASSESSED' },
+      { colour: '#f59e0b', label: 'Unmatched', note: 'no rule applied',
+        test: () => true },
+    ];
+
+    function renderMarkerLegend() {
+      const el = document.getElementById('legend-markers');
+      if (!el) return;
+      el.innerHTML = MARKER_LEGEND.map(r => `
+        <div class="flex items-center gap-2">
+          <span class="legend-swatch" style="background:${r.colour}"></span>
+          <span class="t2">${r.label}</span>
+          <span class="ml-auto font-mono text-[12.5px] t3">${r.note}</span>
+        </div>`).join('');
+    }
+
     function renderMapMarkers() {
       if (!markersLayerGroup) return;
       markersLayerGroup.clearLayers();
 
       filteredIncidents.forEach(inc => {
-        let color = '#f59e0b';
-        let pulseClass = '';
-
-        if (inc.alert_priority === 'P0_EMERGENCY') {
-          color = '#ff2a5f';
-          pulseClass = 'pulse-shockwave';
-        } else if (inc.alert_priority === 'P2_ADVISORY' || inc.predicted_class === 'PERSISTENT_BASELINE') {
-          color = '#f97316';
-        } else if ((inc.facility_type || '').includes('mining')) {
-          color = '#fbbf24';
-        } else if (inc.predicted_class === 'AGRICULTURAL_BURN') {
-          // Was 'AGRICULTURAL_STUBBLE', a class name that exists nowhere in
-          // the Python, so this branch could never fire and every crop burn
-          // fell through to the green "outside industry" colour below.
-          color = '#eab308';
-        } else if (inc.predicted_class === 'FOREST_FIRE') {
-          color = '#16a34a';
-        } else if (inc.predicted_class === 'NOT_ASSESSED' || !inc.inside_industrial) {
-          // Never sent to the classifier. Muted on purpose: a marker that
-          // looks like a classification it never received is a claim.
-          color = '#64748b';
-        }
+        const rule = MARKER_LEGEND.find(r => r.test(inc)) || MARKER_LEGEND[MARKER_LEGEND.length - 1];
+        const color = rule.colour;
+        const pulseClass = rule.pulse || '';
 
         const radius = Math.min(11, Math.max(4.5, Math.sqrt(inc.frp) * 1.45));
 
