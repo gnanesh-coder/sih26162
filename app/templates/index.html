@@ -3279,6 +3279,36 @@
 
         const radius = Math.min(11, Math.max(4.5, Math.sqrt(inc.frp) * 1.45));
 
+        /*
+          The footprint, drawn before the dot and only where the corpus knows it.
+
+          A FIRMS detection is a pixel CENTROID, not a fire. The fire is
+          somewhere inside a cell of scan x track kilometres -- 375 m for VIIRS
+          at nadir, 1 km for MODIS, both growing toward the edge of the swath.
+          Zoomed in, a fixed-size dot sits on one rooftop and reads as "the fire
+          is here", which is a claim the sensor cannot support and the reason
+          markers look like they miss the plant.
+
+          L.circle takes metres, so this one scales with zoom: it stays
+          invisible at national view and opens up into the real cell as an
+          operator zooms, which is exactly when the distinction starts to
+          matter. Where scan/track are absent nothing is drawn -- a guessed
+          footprint would be worse than none.
+        */
+        const scanKm = Number(inc.scan_km) || 0;
+        const trackKm = Number(inc.track_km) || 0;
+        if (scanKm > 0 && trackKm > 0) {
+          markersLayerGroup.addLayer(L.circle([inc.latitude, inc.longitude], {
+            radius: (Math.max(scanKm, trackKm) * 1000) / 2,
+            color: color,
+            weight: 1,
+            opacity: 0.35,
+            fillColor: color,
+            fillOpacity: 0.10,
+            interactive: false,
+          }));
+        }
+
         const marker = L.circleMarker([inc.latitude, inc.longitude], {
           radius: radius,
           fillColor: color,
@@ -3506,7 +3536,17 @@
 
       document.getElementById('dossier-facility-name').textContent = sourceTitle(inc);
       loadIncidentAttribution(inc.id);
-      document.getElementById('dossier-coords').textContent = `Lat: ${inc.latitude.toFixed(4)}°, Lon: ${inc.longitude.toFixed(4)}° (${inc.satellite || 'VIIRS'})`;
+      /*
+        The coordinate is a pixel centroid, so the footprint is said out loud
+        beside it. Four decimal places is ~11 m and the pixel is 375-1000 m;
+        printing the former without the latter is false precision, and it is
+        why a marker can look like it misses the plant it belongs to.
+      */
+      const footprint = (Number(inc.scan_km) > 0 && Number(inc.track_km) > 0)
+        ? ` · ${Number(inc.scan_km).toFixed(2)}×${Number(inc.track_km).toFixed(2)} km pixel`
+        : '';
+      document.getElementById('dossier-coords').textContent =
+        `Lat: ${inc.latitude.toFixed(4)}°, Lon: ${inc.longitude.toFixed(4)}° (${inc.satellite || 'VIIRS'})${footprint}`;
       document.getElementById('dossier-status').textContent = inc.status || 'OPEN';
       document.getElementById('dossier-prediction-label').textContent = inc.predicted_class || 'ACCIDENTAL FIRE';
 

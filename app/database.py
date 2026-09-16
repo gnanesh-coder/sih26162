@@ -240,6 +240,23 @@ class Incident(Base):
     timestamp_utc = Column(DateTime, nullable=False, index=True)
     satellite = Column(String(32), default="VIIRS")
 
+    # The size of the pixel this detection came from, in kilometres along-scan
+    # and along-track.
+    #
+    # Stored because a FIRMS detection is a pixel CENTROID, not a fire. The fire
+    # is somewhere inside that footprint, and the footprint is not small: VIIRS
+    # is 375 m at nadir and MODIS 1 km, both growing toward the edge of the
+    # swath -- the spatial join already widens its match tolerance by half the
+    # along-scan size for exactly this reason (see `adaptive_buffer`).
+    #
+    # Without these the dashboard draws a fixed-size dot, which reads as "the
+    # fire is at this rooftop" when the honest claim is "the fire is somewhere
+    # in this cell". Nullable because a corpus built before this existed has no
+    # values, and an absent footprint must stay absent rather than defaulting
+    # to a precision that was never measured.
+    scan_km = Column(Float, nullable=True)
+    track_km = Column(Float, nullable=True)
+
     if IS_POSTGRES:
         # The reason PostGIS is here rather than a pair of indexed floats.
         # A bounding-box filter on latitude/longitude is wrong at range: a
@@ -320,6 +337,8 @@ class Incident(Base):
             "bright_ti5": self.bright_ti5,
             "timestamp_utc": self.timestamp_utc.isoformat() if self.timestamp_utc else None,
             "satellite": self.satellite,
+            "scan_km": self.scan_km,
+            "track_km": self.track_km,
             "inside_industrial": self.inside_industrial,
             "facility_name": self.facility_name,
             "facility_type": self.facility_type,

@@ -171,6 +171,22 @@ def resolve_audit_corpus() -> Path:
     return chosen
 
 
+def _optional_float(value) -> Optional[float]:
+    """A float, or None when the corpus does not carry the field.
+
+    None is the point: a missing pixel footprint must stay missing rather than
+    defaulting to a nominal size, because the whole reason to store it is that
+    the real one varies with scan angle.
+    """
+    if value is None or pd.isnull(value):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
 def seed_database_from_parquet(db: Session, parquet_path: Path = OUTPUT_PROCESSED_PARQUET) -> int:
     """Populates Incident and H3Baseline tables from processed FIRMS parquet."""
     if not parquet_path.exists():
@@ -312,6 +328,12 @@ def seed_database_from_parquet(db: Session, parquet_path: Path = OUTPUT_PROCESSE
             bright_ti5=ti5,
             timestamp_utc=ts,
             satellite=sat,
+            # Pixel footprint, carried through so the map can draw where the
+            # fire actually might be rather than a point it cannot justify.
+            # Absent in a corpus built before these columns existed, and left
+            # absent rather than guessed.
+            scan_km=_optional_float(row.get("scan")),
+            track_km=_optional_float(row.get("track")),
             inside_industrial=inside_ind,
             facility_name=fac_name,
             facility_type=fac_type,

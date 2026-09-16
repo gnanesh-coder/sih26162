@@ -233,3 +233,56 @@ def test_no_rule_claims_a_detection_was_unclassified_by_position():
     for line in block.splitlines():
         if "inside_industrial" in line:
             assert "NOT_ASSESSED" not in line, f"position used as proof of non-assessment: {line.strip()}"
+
+
+# ---------------------------------------------------------------------------
+# A detection is a pixel, not a point
+#
+# FIRMS reports the CENTROID of a pixel that is 375 m (VIIRS) to 1 km (MODIS)
+# across at nadir, and larger toward the edge of the swath. Drawn as a
+# fixed-size dot at high zoom that reads as "the fire is at this rooftop",
+# which is the reason markers appear not to sit on the plant they belong to.
+# ---------------------------------------------------------------------------
+
+def test_marker_footprint_is_drawn_in_metres_not_pixels():
+    """L.circleMarker takes screen pixels and never scales with zoom.
+
+    The footprint has to be L.circle, whose radius is metres, or it cannot
+    represent a real distance on the ground.
+    """
+    start = UI.index("function renderMapMarkers()")
+    end = UI.index("function initHeatmap()", start)
+    body = UI[start:end]
+
+    assert "L.circle(" in body, "no ground-truth footprint is drawn"
+    assert "scan_km" in body and "track_km" in body
+
+
+def test_footprint_is_withheld_when_the_pixel_size_is_unknown():
+    """A guessed footprint is worse than none.
+
+    A corpus built before scan/track were stored has no values, and defaulting
+    to a nominal size would assert a precision that was never measured.
+    """
+    start = UI.index("function renderMapMarkers()")
+    end = UI.index("function initHeatmap()", start)
+    body = UI[start:end]
+
+    assert "scanKm > 0 && trackKm > 0" in body, (
+        "the footprint must be conditional on the corpus actually carrying it"
+    )
+
+
+def test_the_dossier_states_the_pixel_size_beside_the_coordinate():
+    """Four decimals is ~11 m against a 375-1000 m pixel. Say both."""
+    assert "km pixel" in UI
+
+
+def test_basemaps_declare_a_native_zoom_ceiling():
+    """Past a provider's real ceiling Esri returns a "Map data not yet
+    available" placeholder, not nothing -- which is what filled the map when an
+    operator zoomed into an incident."""
+    assert UI.count("maxNativeZoom") >= 4, (
+        "tile layers must cap requests at the provider's real ceiling and "
+        "upscale, rather than requesting tiles that do not exist"
+    )
