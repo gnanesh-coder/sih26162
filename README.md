@@ -46,10 +46,11 @@ Dashboard at **http://127.0.0.1:8000/**, Swagger at `/docs`, ReDoc at `/redoc`.
 
 ### ⚠️ A fresh clone will not work until you fetch the data
 
-**The repository contains code, not data.** The reference layers and corpora are derived from
-a 1.8 GB OpenStreetMap extract and a year of FIRMS pulls; committing them would put multiple
-gigabytes of binary into every clone. Without them the system starts but the spatial join
-finds nothing, `FOREST_FIRE` is withheld, and responders report `UNAVAILABLE`.
+**The derived reference layers ARE committed** (88 MB: 28,587 industrial polygons, 76,186
+forest, 61,001 responders), so a fresh clone classifies correctly out of the box. What is
+*not* committed is the 1.8 GB OSM extract they came from and the FIRMS corpora, which are
+gitignored. Without a corpus the system starts and `POST /api/v1/classify` works, but the
+incident list is empty and the compliance register and H3 map report no data.
 
 | Asset | Size | How to get it |
 | :--- | ---: | :--- |
@@ -73,8 +74,8 @@ outputs, and copying 137 MB is faster than a 1.8 GB download plus three extracti
 DATABASE_URL=sqlite:///data/fire_db.sqlite
 ```
 
-Everything works — 1,363 incidents, no server, no Docker. `/api/v1/health` reports
-`"database_mode": "sqlite_offline"`.
+No server, no Docker. `/api/v1/health` reports `"database_mode": "sqlite_offline"` and
+`"offline_mode": true` — SQLite is an explicit choice here, never an automatic fallback.
 
 **PostGIS is the deployment target.** To use it:
 
@@ -111,6 +112,27 @@ apply_serving_guards() — non-combustion · out-of-domain · forest cover
         ↓
 FastAPI dashboard · TreeSHAP attribution · dispatch
 ```
+
+### Events, not pixels
+
+Detections are grouped into **events** before anything reasons about them — one fire is one
+row, not one row per overpass. `src/pipeline/event_builder.py` groups by recurrence key,
+splits on gaps over 48 h, and links detections within 1 km (the same parallax budget
+`persistence_resolution` was chosen for).
+
+That unlocks features the labelling rule structurally cannot see, because they are properties
+of a *group*: `duration_h`, `centroid_drift_km`, `extent_km`, `frp_trend_mw_per_day`. Drift is
+the one worth arguing for — a flare stack is bolted down and a fire front is not, and that
+distinction owes nothing to OpenStreetMap coverage. Measured on synthetic sources, a facility
+drifts 0.041 km/day against a moving front's 0.432.
+
+`evaluate_events_against_verified()` then scores the register **one citation at a time**.
+This matters more than it sounds: a model answering `PERSISTENT_BASELINE` for everything
+scores 0.9785 detection-weighted and 0.4000 event-weighted, because Jharia's 23,633 pixels
+drown Buncefield's 5.
+
+Whether these features carry real signal is still a hypothesis — the circularity delta after
+retraining is what decides it, and that number does not exist yet.
 
 **Four trained classes plus one served-only class:** `PERSISTENT_BASELINE`,
 `ACCIDENTAL_FIRE`, `AGRICULTURAL_BURN`, `TRANSIENT_HOTSPOT`, and `FOREST_FIRE` — which the
@@ -165,7 +187,7 @@ assumptions that produced it.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-**376 tests, 2 skipped.** The suite sets its own SQLite URL before anything imports, so it
+**468 tests, 20 skipped.** The suite sets its own SQLite URL before anything imports, so it
 never touches the live database and needs no server.
 
 Notable guards: no coordinate can reach the feature space; the weak-labelling rule cannot file
@@ -179,15 +201,15 @@ build instead of reading as authoritative.
 ## Layout
 
 ```
-app/          FastAPI service — database.py (PostGIS ORM), main.py (28 endpoints), templates/
+app/          FastAPI service — database.py (PostGIS ORM), main.py (29 endpoints), templates/
 src/
   ingestion/  FIRMS, OSM PBF extraction, Sentinel-2, Sentinel-3 SLSTR
-  pipeline/   spatial join, feature engineering, forest cover, responders, replay mode
+  pipeline/   spatial join, event builder, event features, forest cover, responders, replay
   models/     XGBoost trainer, labelling rule v8, verified labels, explainability
   alerting/   H3 state machine, SitRep generator, dispatcher
   reporting/  H3 aggregation for the map
 scripts/      corpus utilities, register generation, PostGIS migration
-tests/        376 tests
+tests/        468 tests
 ```
 
 ---

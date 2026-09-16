@@ -709,7 +709,7 @@ Note that the plume *length* is a genuine function of Fire Radiative Power. It i
 
 ## 5. Complete REST API Reference
 
-All 28 endpoints run on `http://127.0.0.1:8000` with interactive Swagger docs at `/docs` and ReDoc at `/redoc`.
+All 29 endpoints run on `http://127.0.0.1:8000` with interactive Swagger docs at `/docs` and ReDoc at `/redoc`.
 
 | Method | Endpoint | Tags | Description |
 | :--- | :--- | :--- | :--- |
@@ -1581,7 +1581,7 @@ Regenerate this section with `python scripts/generate_verified_register.py` afte
 
 ## 6. Verification, Testing & Robustness Suite
 
-The test suite consists of **376 automated pytest unit and integration tests** located in `tests/`:
+The test suite consists of **468 automated pytest unit and integration tests** located in `tests/` (20 skip without a corpus or a live PostGIS):
 
 ```bash
 # Run complete test suite
@@ -1605,7 +1605,7 @@ The test suite consists of **376 automated pytest unit and integration tests** l
   - Validates Uber H3 resolution 9 binning, recurrence counters, persistent baseline suppression, and escalation triggers.
 - **`tests/test_sentinel2.py` (36 tests)**:
   - Covers the Sentinel-2 dNBR client entirely offline: USGS severity breakpoints, latitude-corrected bounding boxes, dNBR arithmetic from stubbed scene statistics, cache round-trips, request rationing, and — critically — that a missing credential, a cloud-obscured scene, or a future event date all report `dnbr=None` rather than a fabricated `0.0`.
-- **`tests/test_hex_aggregator.py` (18 tests)**:
+- **`tests/test_hex_aggregator.py` (17 tests)**:
   - Guards the corpus-scale map layer: that the H3 roll-up lands a fine cell inside its own parent, that the payload stays bounded and declares truncation, that a single P0 outranks a crowd of suppressed agricultural detections, and that a cell reports both its highest priority (for sorting) and its most common one (for colour) -- because colouring by the highest turns every 22 km cell in India red.
 - **`tests/test_slstr.py` (14 tests)**:
   - Covers the Sentinel-3 SLSTR client offline: that an unconfigured client makes no network call, that the background annulus really is an annulus (opposite winding, hole larger than the hot area) so the fire is not measured against itself, that the background is pinned to the *same* acquisition as the source, and that a failed retrieval reports `NO_SOLUTION` rather than returning a number.
@@ -1614,18 +1614,29 @@ The test suite consists of **376 automated pytest unit and integration tests** l
 
 - **`tests/test_replay_mode.py` (13 tests)**:
   - Guards the feature least likely to be exercised before it matters: that replay stops the refresh loop rather than retrying a dead network while an operator is talking, that leaving replay lets ingestion resume rather than stranding the badge, that the preflight reports `INCOMPLETE` when an asset is genuinely missing -- a preflight that always says READY is worse than none -- and that the basemap caveat, the one gap with no local fallback, is never quietly dropped.
-- **`tests/test_forest_cover.py` (17 tests)**:
+- **`tests/test_forest_cover.py` (15 tests)**:
   - Guards the forest-fire segregation the mandate asks for: that a missing land-cover layer disables the determination rather than breaking classification, that latitude and longitude are not transposed, that only open-ground burns are refined -- a brick kiln in a forest clearing is still a brick kiln, and an accidental fire relabelled `FOREST_FIRE` would be downgraded out of dispatch -- and that the determination runs *behind* the guards which withhold unearned claims, so Indian land cover is never asserted in Texas.
-- **`tests/test_verified_labels.py` (28 tests)**:
+- **`tests/test_verified_labels.py` (34 tests)**:
   - Guards the only measurement in the project that is independent of its own labelling rule: that a `VerifiedEvent` cannot be constructed without a citation, that overlapping windows resolve to the more specific claim, that the harness refuses to report accuracy when nothing matched rather than returning a flattering zero-support figure, and that the generated register in section 5c still contains every event, every source citation and every undetected incident -- so a stale evidence table fails the build instead of reading as authoritative.
 - **`tests/test_compliance_register.py` (9 tests)**:
   - Guards the flaring register against the three ways it could libel an operator: misattributing a detection to the wrong facility, listing a solar farm as an emitter, and printing a carbon figure derived from an emission factor nobody sourced.
 - **`tests/test_firms_archive.py` (23 tests)**:
   - Covers archive retrieval offline: that a span longer than the API's 5-day ceiling is paged rather than silently truncated, that NRT and SP sources are routed by date and deduplicated where they overlap, and that every configured sensor is actually queried.
-- **`tests/test_dispatcher.py` (27 tests)**:
+- **`tests/test_dispatcher.py` (18 tests)**:
   - Covers alert dispatch safety: that dry-run is the default, that a failed send reports failure rather than success, and that suppression rules cannot be bypassed by a malformed payload.
-- **`tests/test_postgis_layer.py` (22 tests)**:
+- **`tests/test_postgis_layer.py` (23 tests)**:
   - Guards the datastore migration (6b). Chiefly: that a configured-but-unreachable PostGIS **raises instead of falling back**, because the geometry column exists only in PostGIS mode and degrading silently would leave every proximity query returning nothing from a schema that reports itself healthy. Also that `docker-compose.yml` and the application agree on credentials *and defaults* -- the test parses the compose file and compares -- and that the audit log's duplicate check survives a SQLite string meeting a PostgreSQL datetime, which is the bug that turned 31 evidence rows into 61.
+
+- **`tests/test_event_builder.py` (16 tests)**:
+  - Guards the grouping that decides what one fire *is*. A refinery scattered across cells is one event; a source that goes quiet for a week and restarts is two; a front moving inside the 1 km link budget stays one and a faster one fragments -- asserted deliberately, because two events that should be one are both still alerted, while one event that should be two hides a fresh ignition inside an existing record. Event ids are held stable under row reordering, or every downstream join and adjudication record becomes unreproducible.
+- **`tests/test_event_features.py` (21 tests)**:
+  - Guards the features that exist to be independent of the labelling rule. The load-bearing one asserts `EVENT_ONLY_FEATURES` stays disjoint from `LABEL_RULE_FEATURES`: if the rule ever learns to read `centroid_drift_km`, the circularity audit must start ablating it, and the build fails until someone decides. Also that drift separates a static facility from a moving front, that a bearing is withheld when nothing moved, and that an unmeasured dNBR stays `None` rather than becoming `0.0`.
+- **`tests/test_map_legend.py` (21 tests)**:
+  - Holds the map's colours in one table (`MARKER_LEGEND`) rather than an if-chain that drifted from a hand-written legend -- green once meant "suppressed" in the legend and "forest fire" on the map. Now also that a detection is drawn as the *pixel* it is: an `L.circle` footprint in metres from `scan_km`/`track_km`, withheld entirely where the corpus does not carry them, because a guessed footprint asserts precision that was never measured.
+- **`tests/test_sms_channel.py` (16 tests)**:
+  - Covers SMS delivery: a result is SENT only when the gateway said so, a half-delivered page reports PARTIAL rather than collapsing into SENT or FAILED, one recipient's exception does not stop the others, dispatch stays a dry run unless explicitly enabled, and numbers are masked in the audit trail. Segment arithmetic too -- the truncation marker was once a typographic ellipsis, outside GSM-7, silently promoting every trimmed message to UCS-2 and three segments.
+- **`tests/test_classify_contract.py` (14 tests)** and **`tests/test_webhook_text_format.py` (9 tests)**:
+  - The serving guards at the API boundary (a Texan burn withheld, a solar park reported as an artifact, a forest burn upgraded from land cover) and the plain-text webhook body that reaches a phone.
 
 ### Operating System Resilience:
 - **Responsive collapse, and the specificity bug that disabled it**: the shell's breakpoints at 1280px and 900px existed and had **never once applied**. `.shell[data-rail="collapsed"][data-dossier="closed"]` carries specificity 0,3,0; a media query adds none, so a bare `.shell` inside one always lost to attributes that are set on every load. Below roughly 800px the fixed 360px rail and 400px dossier left the map cell no room, its container reached zero width, and Leaflet threw `Invalid LatLng object: (NaN, NaN)` once per animation frame -- **36 uncaught errors per page load, with a blank map behind them**. Measured directly: a 1440px viewport produced 0, an 820px viewport produced 36. The breakpoint variants are now repeated inside each query so they carry equal specificity, and `.stage` has a 320px floor so the map can never be handed a zero-width container regardless. Verified at 820px and 1440px: **zero console errors at both**.
