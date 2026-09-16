@@ -280,13 +280,9 @@ class EmailChannel(DispatchChannel):
 class SmsChannel(DispatchChannel):
     """Sends the alert as SMS through a configured gateway.
 
-    Three providers, because the sensible choice depends on what the operator
+    Two providers, because the sensible choice depends on what the operator
     has rather than on what this project prefers:
 
-    * ``httpsms``  -- httpsms.com turns an ordinary Android handset into the
-      gateway. Free, no commercial account, and the messages leave from a real
-      Indian number, which matters: a transactional SMS from an unknown foreign
-      shortcode is the one most likely to be ignored at 3am.
     * ``twilio``   -- the commercial default, if an account exists.
     * ``generic``  -- any gateway that accepts an HTTP POST. The body is a
       template with ``{to}``, ``{from}`` and ``{text}`` placeholders, so a
@@ -307,7 +303,6 @@ class SmsChannel(DispatchChannel):
 
     name = "sms"
 
-    HTTPSMS_URL = "https://api.httpsms.com/v1/messages/send"
     TWILIO_URL = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
 
     def __init__(self) -> None:
@@ -317,8 +312,6 @@ class SmsChannel(DispatchChannel):
         ]
         self.sender = os.getenv("ALERT_SMS_FROM", "").strip()
 
-        # httpsms
-        self.api_key = os.getenv("ALERT_SMS_API_KEY", "")
         # twilio
         self.twilio_sid = os.getenv("ALERT_TWILIO_ACCOUNT_SID", "").strip()
         self.twilio_token = os.getenv("ALERT_TWILIO_AUTH_TOKEN", "")
@@ -333,8 +326,6 @@ class SmsChannel(DispatchChannel):
     def is_configured(self) -> bool:
         if not self.recipients:
             return False
-        if self.provider == "httpsms":
-            return bool(self.api_key and self.sender)
         if self.provider == "twilio":
             return bool(self.twilio_sid and self.twilio_token and self.sender)
         if self.provider == "generic":
@@ -349,14 +340,7 @@ class SmsChannel(DispatchChannel):
 
     def _send_one(self, number: str, text: str) -> tuple:
         """Returns (ok, detail) for one recipient."""
-        if self.provider == "httpsms":
-            resp = requests.post(
-                self.HTTPSMS_URL,
-                json={"content": text, "from": self.sender, "to": number},
-                headers={"x-api-key": self.api_key, "Content-Type": "application/json"},
-                timeout=DISPATCH_TIMEOUT_S,
-            )
-        elif self.provider == "twilio":
+        if self.provider == "twilio":
             resp = requests.post(
                 self.TWILIO_URL.format(sid=self.twilio_sid),
                 data={"From": self.sender, "To": number, "Body": text},

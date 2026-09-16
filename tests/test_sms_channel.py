@@ -33,26 +33,30 @@ DEVANAGARI_NAME = "झरिया कोयला खदान"
 
 
 @pytest.fixture
-def httpsms(monkeypatch):
+def twilio(monkeypatch):
     monkeypatch.setenv("ALERT_DISPATCH_ENABLED", "true")
-    monkeypatch.setenv("ALERT_SMS_PROVIDER", "httpsms")
+    monkeypatch.setenv("ALERT_SMS_PROVIDER", "twilio")
     monkeypatch.setenv("ALERT_SMS_TO", "+919876543210,+919812345678")
     monkeypatch.setenv("ALERT_SMS_FROM", "+919000000000")
-    monkeypatch.setenv("ALERT_SMS_API_KEY", "test-key")
+    monkeypatch.setenv("ALERT_TWILIO_ACCOUNT_SID", "ACfake")
+    monkeypatch.setenv("ALERT_TWILIO_AUTH_TOKEN", "test-token")
     return D.SmsChannel()
 
 
 # ---------------------------------------------------------------------------
 # Only the gateway can say SENT
+#
+# These guarantees are provider-agnostic -- exercised against twilio here, but
+# nothing below depends on which of the two providers is configured.
 # ---------------------------------------------------------------------------
 
-def test_all_delivered_reports_sent(httpsms):
+def test_all_delivered_reports_sent(twilio):
     with mock.patch.object(D.requests, "post") as post:
         post.return_value = mock.Mock(status_code=200, text="ok")
-        assert httpsms.send(ALERT).status is D.DispatchStatus.SENT
+        assert twilio.send(ALERT).status is D.DispatchStatus.SENT
 
 
-def test_some_delivered_reports_partial_not_sent(httpsms):
+def test_some_delivered_reports_partial_not_sent(twilio):
     """A half-delivered page is neither SENT nor FAILED.
 
     Collapsing it into either misinforms the operator about whether responders
@@ -60,35 +64,36 @@ def test_some_delivered_reports_partial_not_sent(httpsms):
     """
     with mock.patch.object(D.requests, "post") as post:
         post.side_effect = [
-            mock.Mock(status_code=200, text="ok"),
+            mock.Mock(status_code=201, text="ok"),
             mock.Mock(status_code=402, text="insufficient credit"),
         ]
-        result = httpsms.send(ALERT)
+        result = twilio.send(ALERT)
     assert result.status is D.DispatchStatus.PARTIAL
     assert "1 of 2 delivered" in result.detail
 
 
-def test_none_delivered_reports_failed(httpsms):
+def test_none_delivered_reports_failed(twilio):
     with mock.patch.object(D.requests, "post") as post:
         post.return_value = mock.Mock(status_code=500, text="gateway down")
-        assert httpsms.send(ALERT).status is D.DispatchStatus.FAILED
+        assert twilio.send(ALERT).status is D.DispatchStatus.FAILED
 
 
-def test_one_exception_does_not_stop_the_other_recipient(httpsms):
+def test_one_exception_does_not_stop_the_other_recipient(twilio):
     """A crew that can be reached must still be reached."""
     with mock.patch.object(D.requests, "post") as post:
-        post.side_effect = [ConnectionError("dns"), mock.Mock(status_code=200, text="ok")]
-        assert httpsms.send(ALERT).status is D.DispatchStatus.PARTIAL
+        post.side_effect = [ConnectionError("dns"), mock.Mock(status_code=201, text="ok")]
+        assert twilio.send(ALERT).status is D.DispatchStatus.PARTIAL
 
 
 def test_unconfigured_is_not_configured_rather_than_not_implemented(monkeypatch):
     """The adapter exists now, so the honest failure is missing credentials."""
-    for key in ("ALERT_SMS_PROVIDER", "ALERT_SMS_TO", "ALERT_SMS_API_KEY"):
+    for key in ("ALERT_SMS_PROVIDER", "ALERT_SMS_TO", "ALERT_TWILIO_ACCOUNT_SID",
+               "ALERT_TWILIO_AUTH_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     assert D.SmsChannel().send(ALERT).status is D.DispatchStatus.NOT_CONFIGURED
 
 
-def test_dispatch_disabled_is_a_dry_run_not_a_send(monkeypatch, httpsms):
+def test_dispatch_disabled_is_a_dry_run_not_a_send(monkeypatch, twilio):
     """A replay over a year of archived detections must never page anyone."""
     monkeypatch.setenv("ALERT_DISPATCH_ENABLED", "false")
     with mock.patch.object(D.requests, "post") as post:
@@ -100,14 +105,6 @@ def test_dispatch_disabled_is_a_dry_run_not_a_send(monkeypatch, httpsms):
 # ---------------------------------------------------------------------------
 # Providers
 # ---------------------------------------------------------------------------
-
-def test_httpsms_sends_the_api_key_as_a_header(httpsms):
-    with mock.patch.object(D.requests, "post") as post:
-        post.return_value = mock.Mock(status_code=200, text="ok")
-        httpsms.send(ALERT)
-    assert post.call_args.args[0] == D.SmsChannel.HTTPSMS_URL
-    assert post.call_args.kwargs["headers"]["x-api-key"] == "test-key"
-
 
 def test_twilio_uses_basic_auth_and_the_account_url(monkeypatch):
     monkeypatch.setenv("ALERT_DISPATCH_ENABLED", "true")
@@ -184,10 +181,10 @@ def test_gsm7_detection_and_limits():
 # The audit trail must not become a phone directory
 # ---------------------------------------------------------------------------
 
-def test_recipient_numbers_are_masked_in_reports(httpsms):
+def test_recipient_numbers_are_masked_in_reports(twilio):
     with mock.patch.object(D.requests, "post") as post:
-        post.return_value = mock.Mock(status_code=200, text="ok")
-        result = httpsms.send(ALERT)
+        post.return_value = mock.Mock(status_code=201, text="ok")
+        result = twilio.send(ALERT)
     combined = (result.target or "") + (result.detail or "")
     assert "+919876543210" not in combined
     assert "...3210" in result.target
