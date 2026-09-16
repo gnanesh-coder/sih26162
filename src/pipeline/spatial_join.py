@@ -8,6 +8,7 @@ enriched records into the Recurrence State Machine.
 
 import argparse
 import logging
+import re
 import sys
 import warnings
 import os
@@ -89,6 +90,78 @@ def is_non_combustion_site(row: pd.Series) -> bool:
     if "solar thermal" in text or "concentrated solar" in text:
         return False  # CSP genuinely concentrates heat.
     return any(k in text for k in NON_COMBUSTION_KEYWORDS)
+
+
+PLACEHOLDER_FACILITY_NAME = "Unnamed Industrial Site"
+
+# Tag values that describe what a facility *is* when nobody has given it a name.
+# Read straight from OpenStreetMap, never inferred: 78.4% of the 28,587 mapped
+# industrial polygons carry no `name` tag at all, and only 124 of those 22,416
+# carry `operator` or `name:en`. So there is no hidden name to recover -- but
+# thousands do carry `industrial=`, `power=`, `plant:source=` or `description=`,
+# and "Coal-fired power plant" tells an operator far more than "Unnamed site".
+#
+# This is a DESCRIPTOR, not a name. It says what OSM knows about the place. The
+# distinction matters because facility_name reaches SitReps and SMS alerts, and
+# an invented name in a dispatch would be exactly the fabricated detail this
+# project refuses elsewhere.
+_HSTORE = re.compile(r'"([a-z_:]+)"=>"([^"]*)"')
+
+
+def _osm_tags(raw) -> dict:
+    """Parses GDAL's hstore-style `other_tags` blob into a dict."""
+    if not raw or (isinstance(raw, float) and pd.isna(raw)):
+        return {}
+    return dict(_HSTORE.findall(str(raw)))
+
+
+def _descriptor_from_tags(tags: dict) -> Optional[str]:
+    """What OSM says this place is, when it does not say what it is called."""
+    # A real identity, where one exists at all.
+    for key in ("name:en", "operator"):
+        value = (tags.get(key) or "").strip()
+        if value:
+            return value
+
+    # "-fired" is a claim about combustion, so it is reserved for fuels that
+    # actually burn. A photovoltaic array described as "Solar-fired power plant"
+    # would contradict the non-combustion handling three functions above, which
+    # exists precisely because a solar park is not a heat source.
+    source = (tags.get("plant:source") or "").strip().lower()
+    if (tags.get("power") or "").strip() in ("plant", "generator"):
+        if source in ("coal", "gas", "oil", "diesel", "biomass", "biofuel", "waste"):
+            return f"{source.capitalize()}-fired power plant"
+        if source:
+            return f"{source.capitalize()} power plant"
+        return "Power plant"
+
+    industrial = (tags.get("industrial") or "").strip()
+    if industrial:
+        return industrial.replace("_", " ").capitalize()
+
+    description = (tags.get("description") or "").strip()
+    if description:
+        return description[:60]
+
+    return None
+
+
+def _derive_facility_name(df: pd.DataFrame) -> pd.Series:
+    """Facility name per row: the OSM name, else a tag descriptor, else the placeholder."""
+    name = df["name"].replace("None", np.nan) if "name" in df.columns else pd.Series(np.nan, index=df.index)
+    name = name.astype(object).where(name.notna() & (name.astype(str).str.strip() != ""))
+
+    if "other_tags" not in df.columns:
+        return name.fillna(PLACEHOLDER_FACILITY_NAME)
+
+    missing = name.isna()
+    if missing.any():
+        derived = df.loc[missing, "other_tags"].map(
+            lambda raw: _descriptor_from_tags(_osm_tags(raw))
+        )
+        name.loc[missing] = derived
+
+    return name.fillna(PLACEHOLDER_FACILITY_NAME)
 
 
 def classify_facility_type(row: pd.Series) -> str:
@@ -309,7 +382,7 @@ def perform_spatial_join(
         exact_joined["dist_to_industrial_km"] = exact_joined["dist_to_industrial_km"].fillna(999.0).round(2)
 
     # Standardize facility names and types
-    exact_joined["facility_name"] = exact_joined["name"].replace("None", np.nan).fillna("Unnamed Industrial Site")
+    exact_joined["facility_name"] = _derive_facility_name(exact_joined)
     exact_joined.loc[~exact_joined["inside_industrial"], "facility_name"] = None
     exact_joined["facility_type"] = exact_joined.apply(classify_facility_type, axis=1)
 

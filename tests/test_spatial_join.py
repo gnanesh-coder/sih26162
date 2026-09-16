@@ -152,3 +152,71 @@ def test_nadir_detection_keeps_tighter_association(sample_polygons):
     # larger tolerance, the nadir pixel does not.
     assert not joined.iloc[0]["inside_industrial"]
     assert joined.iloc[1]["inside_industrial"]
+
+
+# --------------------------------------------------------------------------
+# Facility naming: a descriptor is not a name
+#
+# 78.4% of the 28,587 mapped industrial polygons carry no `name` tag, and only
+# 124 of those carry `operator` or `name:en` -- so there is no hidden name to
+# recover. Thousands do carry `industrial=`, `power=` or `description=`, and
+# surfacing those took identified sites from 21.6% to 39.6%.
+#
+# facility_name reaches SitReps and one-segment SMS alerts, so the line these
+# tests hold is that everything shown comes from a tag OSM actually carries.
+# --------------------------------------------------------------------------
+
+def _row(name=None, other_tags=None):
+    return pd.DataFrame([{
+        "name": name, "other_tags": other_tags, "inside_industrial": True,
+    }])
+
+
+def test_a_real_osm_name_always_wins():
+    from src.pipeline.spatial_join import _derive_facility_name
+    out = _derive_facility_name(_row(name="Reliance Refinery",
+                                     other_tags='"industrial"=>"factory"'))
+    assert out.iloc[0] == "Reliance Refinery"
+
+
+def test_operator_is_used_when_there_is_no_name():
+    from src.pipeline.spatial_join import _derive_facility_name
+    out = _derive_facility_name(_row(other_tags='"operator"=>"NTPC Limited"'))
+    assert out.iloc[0] == "NTPC Limited"
+
+
+def test_a_burning_plant_is_described_as_fired():
+    from src.pipeline.spatial_join import _derive_facility_name
+    out = _derive_facility_name(
+        _row(other_tags='"power"=>"plant","plant:source"=>"coal"'))
+    assert out.iloc[0] == "Coal-fired power plant"
+
+
+def test_a_solar_plant_is_never_described_as_fired():
+    """The regression: plant:source=solar produced "Solar-fired power plant".
+
+    A photovoltaic array burns nothing, and this project excludes exactly these
+    sites from combustion reasoning -- describing one as fired would contradict
+    `is_non_combustion_site` in the same module.
+    """
+    from src.pipeline.spatial_join import _derive_facility_name
+    out = _derive_facility_name(
+        _row(other_tags='"power"=>"plant","plant:source"=>"solar"'))
+    assert out.iloc[0] == "Solar power plant"
+    assert "fired" not in out.iloc[0].lower()
+
+
+def test_nothing_known_stays_the_placeholder():
+    """An absent name must not become an invented one."""
+    from src.pipeline.spatial_join import (
+        PLACEHOLDER_FACILITY_NAME, _derive_facility_name)
+    assert _derive_facility_name(_row()).iloc[0] == PLACEHOLDER_FACILITY_NAME
+    assert _derive_facility_name(
+        _row(other_tags='"last_check"=>"2024-01-01"')).iloc[0] == PLACEHOLDER_FACILITY_NAME
+
+
+def test_malformed_tags_do_not_raise():
+    from src.pipeline.spatial_join import (
+        PLACEHOLDER_FACILITY_NAME, _derive_facility_name)
+    for junk in ("", "not hstore at all", '"unclosed=>'):
+        assert _derive_facility_name(_row(other_tags=junk)).iloc[0] == PLACEHOLDER_FACILITY_NAME

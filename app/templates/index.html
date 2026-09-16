@@ -2780,23 +2780,42 @@
     }
 
     function initMap() {
+      /*
+        maxNativeZoom is the fix for "Map data not yet available".
+
+        Every tile provider stops publishing at some zoom, and that ceiling is
+        lower over rural India than over a city: Esri World Imagery commonly
+        runs out around z17 in the coal belts where most of these detections
+        land. Asking it for z18 or z19 there does NOT return nothing -- it
+        returns a grey placeholder tile reading "Map data not yet available",
+        which is what fills the map when an operator zooms into an incident.
+
+        maxNativeZoom tells Leaflet to stop *requesting* past the provider's
+        real ceiling and upscale the last real tile instead. The imagery goes
+        soft rather than disappearing, which is the right trade when someone is
+        looking at a fire.
+
+        maxZoom stays 19 on every layer so the map's zoom range does not change
+        when the basemap is switched -- the dark canvas was capped at 16, so
+        switching to it used to clamp the whole map.
+      */
       basemapLayers = {
         esri_satellite: L.layerGroup([
           L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles &copy; Esri World Imagery', maxZoom: 19
+            attribution: 'Tiles &copy; Esri World Imagery', maxZoom: 19, maxNativeZoom: 17
           }),
           L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
-            maxZoom: 19
+            maxZoom: 19, maxNativeZoom: 17
           })
         ]),
         esri_dark: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-          attribution: 'Tiles &copy; Esri Dark Canvas', maxZoom: 16
+          attribution: 'Tiles &copy; Esri Dark Canvas', maxZoom: 19, maxNativeZoom: 16
         }),
         osm_standard: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap', maxZoom: 19
+          attribution: '&copy; OpenStreetMap', maxZoom: 19, maxNativeZoom: 19
         }),
         opentopo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenTopoMap', maxZoom: 17
+          attribution: '&copy; OpenTopoMap', maxZoom: 19, maxNativeZoom: 17
         }),
       };
 
