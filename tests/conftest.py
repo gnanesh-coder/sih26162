@@ -70,3 +70,54 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live_weather: test may call the real weather archive"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gates for the two things a fresh clone does not have.
+#
+# Eleven tests failed on a clean checkout -- not because anything was broken,
+# but because they asserted 200 against endpoints that correctly answer 404 or
+# 503 when their data is absent. That is testing the developer's disk rather
+# than the code, and a suite that is red on a clean checkout teaches its reader
+# to ignore red.
+#
+# The pattern already existed here (`pytest.skip("No incidents available...")`);
+# these fixtures make it reusable and give the skip a reason that says what to
+# build.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def processed_corpus():
+    """The processed corpus path, or a skip when it is not on disk.
+
+    `data/processed/` is gitignored: the parquet is built by the pipeline from a
+    FIRMS pull, so a fresh clone has none. `/api/v1/sync` answers 404 without it
+    and `/api/v1/map/hexes` answers 503, both deliberately.
+    """
+    from src.pipeline.spatial_join import OUTPUT_PROCESSED_PARQUET
+
+    if not OUTPUT_PROCESSED_PARQUET.exists():
+        pytest.skip(
+            f"No processed corpus at {OUTPUT_PROCESSED_PARQUET}. Build one with "
+            "`python -m src.pipeline.spatial_join`, or point PROCESSED_CORPUS at "
+            "an existing archive."
+        )
+    return OUTPUT_PROCESSED_PARQUET
+
+
+@pytest.fixture
+def seeded_incidents(client):
+    """The incident listing, or a skip when the database holds none.
+
+    The suite copies `data/fire_db.sqlite` where it exists and starts empty
+    where it does not, so any test reading incident *content* is conditional on
+    a database somebody built. Tests asserting an endpoint's shape or its
+    empty-state behaviour deliberately do not gate on this.
+    """
+    incidents = client.get("/api/v1/alerts/active?limit=5").json().get("incidents", [])
+    if not incidents:
+        pytest.skip(
+            "No incidents in the test database. Seed one by running the pipeline "
+            "and `POST /api/v1/sync` against a processed corpus."
+        )
+    return incidents

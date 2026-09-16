@@ -72,15 +72,9 @@ def test_atmospheric_dispersion_computation():
     assert disp["recommended_evac_radius_km"] > 0
 
 
-def test_sitrep_json_api_endpoint(client):
+def test_sitrep_json_api_endpoint(client, seeded_incidents):
     """Verifies programmatic JSON SitRep endpoint retrieval."""
-    # Fetch active incidents to get an existing ID
-    alerts_resp = client.get("/api/v1/alerts/active?limit=5")
-    assert alerts_resp.status_code == 200
-    incidents = alerts_resp.json().get("incidents", [])
-    assert len(incidents) > 0, "Database should contain seeded incidents"
-
-    inc_id = incidents[0]["id"]
+    inc_id = seeded_incidents[0]["id"]
     sitrep_resp = client.get(f"/api/v1/incident/{inc_id}/sitrep?format=json")
     assert sitrep_resp.status_code == 200
     data = sitrep_resp.json()
@@ -101,13 +95,9 @@ def test_sitrep_json_api_endpoint(client):
     assert "mgrs_string" in data["geospatial"]
 
 
-def test_sitrep_html_api_endpoint(client):
+def test_sitrep_html_api_endpoint(client, seeded_incidents):
     """Verifies printable A4 HTML SitRep endpoint retrieval."""
-    alerts_resp = client.get("/api/v1/alerts/active?limit=5")
-    incidents = alerts_resp.json().get("incidents", [])
-    assert len(incidents) > 0
-
-    inc_id = incidents[0]["id"]
+    inc_id = seeded_incidents[0]["id"]
     sitrep_resp = client.get(f"/api/v1/incident/{inc_id}/sitrep?format=html")
     assert sitrep_resp.status_code == 200
     assert "text/html" in sitrep_resp.headers["content-type"]
