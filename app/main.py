@@ -205,7 +205,15 @@ def seed_database_from_parquet(db: Session, parquet_path: Path = OUTPUT_PROCESSE
     records_to_insert = []
     h3_counts: Dict[str, List[float]] = {}
 
-    for idx, row in df.iterrows():
+    total_rows = len(df)
+    progress_every = 50_000
+
+    for processed, (idx, row) in enumerate(df.iterrows(), start=1):
+        if processed % progress_every == 0 or processed == total_rows:
+            logger.info(
+                "Seeding progress: %d / %d rows classified (%d queued for insert).",
+                processed, total_rows, len(records_to_insert),
+            )
         lat = float(row["latitude"])
         lon = float(row["longitude"])
         sat = str(row.get("satellite", "VIIRS"))
